@@ -91,7 +91,8 @@
   #composer .row{max-width:920px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
   #input{flex:1;resize:none;background:var(--raised);color:var(--fg);
          border:1px solid var(--line);border-radius:10px;padding:10px 12px;
-         font:15px/1.5 inherit;max-height:200px;min-height:42px;outline:none}
+         font-family:inherit;font-size:15px;line-height:1.5;
+         max-height:200px;min-height:42px;outline:none}
   #input:focus{border-color:var(--cairn)}
   #send{background:var(--cairn);color:#12131c;border:0;border-radius:10px;
         padding:0 18px;height:42px;font-weight:700;cursor:pointer;flex:none}
@@ -132,6 +133,8 @@ function md(s){
   s = esc(s)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,!?)]|$)/g, '$1<em>$2</em>')
     .replace(/(^|\s)\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/^(#{1,4})\s+(.+)$/gm, (_, h, t) => `<div class="h h${h.length}">${t}</div>`)
     .replace(/^[-*]\s+(.+)$/gm, '<div class="li">$1</div>')
@@ -265,7 +268,16 @@ const DRAFT = 'mirror-draft';
 const pending = [];   // {text, at} awaiting confirmation FROM THE STREAM
 
 input.value = localStorage.getItem(DRAFT) || '';
-function resize(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,200)+'px'; }
+function resize(){
+  input.style.height='auto';
+  input.style.height=Math.min(input.scrollHeight,200)+'px';
+  // Keep the feed clear of a growing composer, or a long draft hides the
+  // message you're replying to.
+  const stick = atBottom();
+  document.querySelector('main').style.paddingBottom =
+    (document.getElementById('composer').offsetHeight + 28) + 'px';
+  if (stick) window.scrollTo(0, document.body.scrollHeight);
+}
 function refresh(){ sendBtn.disabled = !input.value.trim(); }
 input.addEventListener('input', () => { localStorage.setItem(DRAFT, input.value); resize(); refresh(); });
 input.addEventListener('keydown', e => {

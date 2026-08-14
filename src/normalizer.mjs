@@ -41,6 +41,38 @@ export const KNOWN_BLOCK_TYPES = new Set(['text', 'thinking', 'tool_use', 'tool_
  * @param {object} ctx    { instance, roomId, speaker, agentId, agentLabel }
  * @returns {object[]} mirror events (without seq/epoch — the log stamps those)
  */
+
+/**
+ * Unwrap a hacs-channel envelope.
+ *
+ * Messages injected through the channel arrive wrapped:
+ *
+ *   [channel message from Lupo@web]
+ *   <the actual message>
+ *   [To answer Lupo@web, call the hacs-channel "reply" tool ...]
+ *
+ * That trailer is guidance for ASYNC senders and it is wrong for a browser
+ * conversation — the human is watching this very stream, so ordinary output IS
+ * the delivery. It also leaks into the sender's own bubble, which is just
+ * noise they have to read past.
+ *
+ * Stripping it here is a display fix, not a protocol fix. The real repair is a
+ * `modality` field on /direct-message so sync senders never get async framing;
+ * that lives in the channel server and needs Crossing.
+ *
+ * Bonus: the envelope names the true sender, which beats any guess.
+ *
+ * @returns {{text: string, from: string|null}}
+ */
+export function unwrapChannelEnvelope(raw) {
+  const m = /^\s*\[channel message from ([^\]]+)\]\s*\n?/.exec(raw);
+  if (!m) return { text: raw, from: null };
+  let text = raw.slice(m[0].length);
+  // Drop the trailing "[To answer ...]" guidance block, however it wraps.
+  text = text.replace(/\n*\[To answer [\s\S]*$/, '');
+  return { text: text.trim(), from: m[1].trim() };
+}
+
 export function normalizeEntry(entry, ctx = {}) {
   const type = entry?.type;
   if (!CONVERSATIONAL.has(type)) return [];
@@ -71,7 +103,11 @@ export function normalizeEntry(entry, ctx = {}) {
   // A bare-string user message (the common shape for typed input).
   if (typeof content === 'string') {
     if (content.trim()) {
-      events.push({ ...base, from, type: 'user_message', body: { text: content } });
+      const un = unwrapChannelEnvelope(content);
+      const speaker = un.from
+        ? { id: un.from, kind: 'human', display: un.from.split('@')[0], channel: un.from.split('@')[1] || 'channel' }
+        : from;
+      if (un.text) events.push({ ...base, from: speaker, type: 'user_message', body: { text: un.text } });
     }
     return events;
   }
@@ -85,11 +121,15 @@ export function normalizeEntry(entry, ctx = {}) {
 
     if (bt === 'text') {
       if (!block.text?.trim()) return;
-      events.push({
-        ...base, from, index,
-        type: type === 'user' ? 'user_message' : 'text',
-        body: { text: block.text },
-      });
+      if (type === 'user') {
+        const un = unwrapChannelEnvelope(block.text);
+        const speaker = un.from
+          ? { id: un.from, kind: 'human', display: un.from.split('@')[0], channel: un.from.split('@')[1] || 'channel' }
+          : from;
+        if (un.text) events.push({ ...base, from: speaker, index, type: 'user_message', body: { text: un.text } });
+      } else {
+        events.push({ ...base, from, index, type: 'text', body: { text: block.text } });
+      }
     } else if (bt === 'thinking') {
       // MEASURED 2026-08-12, Claude Code 2.1.222: thinking blocks are persisted
       // as STRUCTURE ONLY. `thinking` is always "" and only `signature` (an
