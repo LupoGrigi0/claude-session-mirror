@@ -156,6 +156,43 @@ function readBody(req, limit = 1024 * 1024) {
  * POST here cross-origin unless we look. Sec-Fetch-Site is sent by all current
  * browsers; Origin is the fallback.
  */
+
+/**
+ * Describe a connecting client.
+ *
+ * I cannot see the screen the UI renders on, so when a layout bug is reported
+ * the first question is always "on what?". This answers it.
+ *
+ * Server-side we get the User-Agent plus Chromium's low-entropy Client Hints
+ * (sent by default, no permission needed): Sec-CH-UA-Mobile is literally
+ * "is this a phone", Sec-CH-UA-Platform is the OS. Client-side the page adds
+ * viewport, device pixel ratio and touch support as query params, because
+ * EventSource cannot set headers.
+ *
+ * Kept in memory only, tied to the live connection. Not logged to disk.
+ */
+function describeClient(req, url) {
+  const h = req.headers;
+  const ua = h['user-agent'] || '';
+  const strip = v => (v || '').replace(/^"|"$/g, '');
+  const guessed =
+    /iPhone|iPad|iPod/i.test(ua) ? 'iOS' :
+    /Android/i.test(ua)          ? 'Android' :
+    /Macintosh|Mac OS/i.test(ua) ? 'macOS' :
+    /Windows/i.test(ua)          ? 'Windows' :
+    /Linux/i.test(ua)            ? 'Linux' : 'unknown';
+  return {
+    platform: strip(h['sec-ch-ua-platform']) || guessed,
+    mobile: h['sec-ch-ua-mobile'] === '?1' || /Mobi|Android|iPhone/i.test(ua),
+    browser: strip(h['sec-ch-ua']) || ua.slice(0, 90),
+    viewport: url.searchParams.get('vw') && url.searchParams.get('vh')
+      ? `${url.searchParams.get('vw')}x${url.searchParams.get('vh')}` : null,
+    dpr: url.searchParams.get('dpr') || null,
+    touch: url.searchParams.get('touch') === '1',
+    connected_at: new Date().toISOString(),
+  };
+}
+
 function sameOrigin(req) {
   const site = req.headers['sec-fetch-site'];
   if (site) return site === 'same-origin' || site === 'none';
@@ -233,6 +270,7 @@ const server = http.createServer(async (req, res) => {
       epoch: eventLog.epoch,
       seq: eventLog.seq,
       clients: clients.size,
+      connected: [...clients].map(c => c.info).filter(Boolean),
       // NOTE: ok:true means THIS PROCESS is alive. It is not evidence the mind
       // is alive — /health once returned ok through a total outage. Judge
       // liveness from last_event_age_s.
@@ -270,7 +308,10 @@ const server = http.createServer(async (req, res) => {
       afterSeq = Number(lastId);
     }
 
-    const client = { res, queued: 0 };
+    const client = { res, queued: 0, info: describeClient(req, url) };
+    log(`client: ${client.info.platform}${client.info.mobile ? ' (mobile)' : ''}`
+      + `${client.info.viewport ? ' ' + client.info.viewport : ''}`
+      + `${client.info.dpr ? ' @' + client.info.dpr + 'x' : ''}`);
     for (const ev of eventLog.replay(afterSeq)) sseWrite(client, ev);
     clients.add(client);
     stats.clients = clients.size;

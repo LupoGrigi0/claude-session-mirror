@@ -252,7 +252,12 @@ function render(ev){
 // EventSource handles Last-Event-ID and reconnection natively, which is exactly
 // why the server speaks plain SSE with id: <epoch>.<seq>.
 const BASE = '__BASE_PATH__';
-const es = new EventSource(BASE + '/events');
+const clientParams = new URLSearchParams({
+  vw: String(window.innerWidth), vh: String(window.innerHeight),
+  dpr: String(window.devicePixelRatio || 1),
+  touch: ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? '1' : '0',
+});
+const es = new EventSource(BASE + '/events?' + clientParams);
 es.addEventListener('mirror', e => { try { const ev = JSON.parse(e.data); render(ev); confirmFromStream(ev); } catch {} });
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
 es.addEventListener('resync', () => { feed.innerHTML = ''; toolCards.clear(); });
