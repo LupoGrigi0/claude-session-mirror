@@ -28,6 +28,7 @@ import path from 'node:path';
 import { EventLog } from './eventlog.mjs';
 import { TranscriptTailer } from './tailer.mjs';
 import { schemaCanary } from './normalizer.mjs';
+import { resolveIdentity, senderAddress, stubIdentity } from './identity.mjs';
 
 const cfg = {
   instance:   process.env.MIRROR_INSTANCE   || 'unknown',
@@ -38,7 +39,21 @@ const cfg = {
   bind:         process.env.MIRROR_BIND || '127.0.0.1',
   room:         process.env.MIRROR_ROOM || 'default',
   fromStart:    process.env.MIRROR_FROM_START === '1',
+  // Everything is served under this prefix, so one host can front many
+  // instances at /Cairn, /Bastion, /Crossing … Default '' = serve at root.
+  basePath:    (process.env.MIRROR_BASE_PATH || '').replace(/\/+$/, ''),
+  // The instance's own channel server — where a browser message is injected.
+  channelUrl:   process.env.MIRROR_CHANNEL_URL || '',
+  threadId:     process.env.MIRROR_THREAD_ID || 'web',
 };
+
+/** Strip the base path; returns null when the request isn't ours. */
+function route(pathname) {
+  if (!cfg.basePath) return pathname;
+  if (pathname === cfg.basePath) return '/';
+  if (pathname.startsWith(cfg.basePath + '/')) return pathname.slice(cfg.basePath.length);
+  return null;
+}
 
 if (!cfg.transcript) {
   console.error('MIRROR_TRANSCRIPT is required (path to the session .jsonl)');
@@ -71,7 +86,9 @@ const tailer = new TranscriptTailer({
     instance: cfg.instance,
     instanceDisplay: cfg.display,
     roomId: cfg.room,
-    speaker: { id: 'user', kind: 'human', display: 'User' },
+    // Same source as the write path — one person must not have two names.
+    // Replaced by the real resolver the moment authentication is in front.
+    speaker: stubIdentity() || { id: 'user', kind: 'human', display: 'User' },
   },
   onEvents: (events) => {
     for (const ev of events) {
@@ -133,18 +150,81 @@ function readBody(req, limit = 1024 * 1024) {
   });
 }
 
+
+/**
+ * Same-origin check for write endpoints. A browser will happily let any page
+ * POST here cross-origin unless we look. Sec-Fetch-Site is sent by all current
+ * browsers; Origin is the fallback.
+ */
+function sameOrigin(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site === 'same-origin' || site === 'none';
+  const origin = req.headers['origin'];
+  if (!origin) return true;                 // non-browser client (curl, tests)
+  try { return new URL(origin).host === req.headers['host']; } catch { return false; }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || cfg.bind}`);
+  const p = route(url.pathname);
+  if (p === null) { res.writeHead(404).end('not found'); return; }
 
   // ---- POST /hook : FAST ACK. Do not add work here. ----
-  if (req.method === 'POST' && url.pathname === '/hook') {
+  if (req.method === 'POST' && p === '/hook') {
     res.writeHead(204).end();          // ACK first — the session is blocked
     stats.hooks++;
     readBody(req).catch(() => {});     // drain, deliberately ignored
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/health') {
+
+  // ---- POST /send : the write leg. Browser -> channel server -> live session.
+  if (req.method === 'POST' && p === '/send') {
+    if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+
+    // Identity is resolved in exactly one place (src/identity.mjs). If it
+    // cannot be established we refuse — no anonymous speech into a mind.
+    const who = resolveIdentity(req);
+    if (!who) { res.writeHead(401, {'Content-Type':'application/json'})
+                   .end(JSON.stringify({ ok:false, error:'unauthenticated' })); return; }
+
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch { /* handled below */ }
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) { res.writeHead(400, {'Content-Type':'application/json'})
+                    .end(JSON.stringify({ ok:false, error:'empty message' })); return; }
+    if (!cfg.channelUrl) { res.writeHead(503, {'Content-Type':'application/json'})
+                    .end(JSON.stringify({ ok:false, error:'MIRROR_CHANNEL_URL not configured' })); return; }
+
+    // Nonce so the UI can DERIVE delivery by watching the message reappear in
+    // the mirror stream, rather than asking the instance anything (Law 9.1).
+    const nonce = `${Date.now().toString(36)}-${stats.hooks}-${eventLog.seq}`;
+
+    try {
+      const r = await fetch(cfg.channelUrl + '/direct-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // NOTE: every meta value must be a STRING or Claude Code silently drops
+        // the whole notification. Non-negotiable; cost the team a wake gap.
+        body: JSON.stringify({
+          from: senderAddress(who),
+          text,
+          thread_id: String(cfg.threadId),
+        }),
+      });
+      const out = await r.json().catch(() => ({}));
+      log(`send from ${senderAddress(who)} [${who.source}] -> ${r.status}`);
+      res.writeHead(r.ok ? 200 : 502, { 'Content-Type': 'application/json' })
+         .end(JSON.stringify({ ok: r.ok, nonce, identity_source: who.source, channel: out }));
+    } catch (err) {
+      log(`send FAILED: ${err.message}`);
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+         .end(JSON.stringify({ ok:false, error: err.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && p === '/health') {
     const lastAge = stats.lastEventAt ? Math.round((Date.now() - stats.lastEventAt) / 1000) : null;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -159,11 +239,16 @@ const server = http.createServer(async (req, res) => {
       last_event_age_s: lastAge,
       counters: { ...stats },
       uptime_s: Math.round((Date.now() - stats.startedAt) / 1000),
+      write_path: {
+        channel_url: cfg.channelUrl || null,
+        // Loud on purpose: "STUB" here means identity is assumed, not proven.
+        identity_source: (resolveIdentity(req) || { source: 'none' }).source,
+      },
     }, null, 2));
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/events') {
+  if (req.method === 'GET' && p === '/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -195,8 +280,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && url.pathname.startsWith('/blob/')) {
-    const name = path.basename(url.pathname.slice('/blob/'.length));
+  if (req.method === 'GET' && p.startsWith('/blob/')) {
+    const name = path.basename(p.slice('/blob/'.length));
     try {
       const data = fs.readFileSync(path.join(eventLog.blobDir, name), 'utf8');
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(data);
@@ -207,9 +292,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- the browser app ----
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+  if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
     try {
-      const html = fs.readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+      let html = fs.readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+      html = html.replace('__BASE_PATH__', cfg.basePath);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
     } catch (err) {
       res.writeHead(500).end(`cannot read web/index.html: ${err.message}`);
@@ -228,7 +314,7 @@ server.on('error', (err) => {
 });
 
 server.listen(cfg.port, cfg.bind, () => {
-  log(`listening on http://${cfg.bind}:${cfg.port}  (events, health, hook, blob)`);
+  log(`listening on http://${cfg.bind}:${cfg.port}${cfg.basePath || ''}  (events, health, hook, blob)`);
   // Everything is wired now — safe to start emitting.
   tailer.start({ fromStart: cfg.fromStart });
 });

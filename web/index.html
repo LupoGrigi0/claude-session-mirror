@@ -9,6 +9,7 @@
     --bg:#1a1b26; --panel:#1f2335; --raised:#24283b; --line:#2f3549;
     --fg:#c0caf5; --dim:#7f8bb0; --faint:#565f89;
     --cairn:#7aa2f7; --human:#9ece6a; --tool:#e0af68; --sub:#bb9af7; --err:#f7768e;
+    --inset:12%;   /* how far the other party's bubbles pull in */
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
@@ -40,6 +41,15 @@
   .subagent .name{color:var(--sub)} .subagent .bubble{border-left-color:var(--sub)}
   .system .name{color:var(--tool)}
 
+  /* Conversational asymmetry: mine hang left, Lupo's pull in from the left and
+     sit right. Deliberately gentle — a lean, not iMessage. */
+  .instance, .subagent, .system { margin-right: var(--inset); }
+  .human { margin-left: var(--inset); }
+  .human .who { justify-content: flex-end; }
+  .human .bubble { border-left: none; border-right: 3px solid var(--human);
+                   background: #1e2430; }
+  @media (max-width: 700px){ :root{ --inset: 5%; } }
+
   /* tool call: a chip you can open */
   details.tool{background:var(--raised);border:1px solid var(--line);border-radius:8px;
                border-left:3px solid var(--tool);margin:8px 0}
@@ -64,6 +74,30 @@
   .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
   .note{font:11px var(--mono);color:var(--faint);margin-top:6px}
   a{color:var(--cairn)}
+  .gist{font:11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;
+        white-space:nowrap;min-width:0;flex:1}
+  .h{font-weight:700;margin:10px 0 4px;color:#dfe6ff;line-height:1.3}
+  .h1{font-size:1.25em} .h2{font-size:1.12em} .h3{font-size:1em} .h4{font-size:.95em}
+  .li{padding-left:16px;position:relative;margin:2px 0}
+  .li::before{content:"\u2022";position:absolute;left:4px;color:var(--faint)}
+  /* long unbroken tokens in inline code were forcing the page sideways,
+     which clipped the sticky header */
+  code{overflow-wrap:anywhere;word-break:break-word}
+  html,body{max-width:100%;overflow-x:hidden}
+  details.tool>summary>strong{flex:none}
+  /* composer */
+  #composer{position:fixed;left:0;right:0;bottom:0;background:var(--panel);
+            border-top:1px solid var(--line);padding:10px 16px;z-index:6}
+  #composer .row{max-width:920px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+  #input{flex:1;resize:none;background:var(--raised);color:var(--fg);
+         border:1px solid var(--line);border-radius:10px;padding:10px 12px;
+         font:15px/1.5 inherit;max-height:200px;min-height:42px;outline:none}
+  #input:focus{border-color:var(--cairn)}
+  #send{background:var(--cairn);color:#12131c;border:0;border-radius:10px;
+        padding:0 18px;height:42px;font-weight:700;cursor:pointer;flex:none}
+  #send:disabled{opacity:.4;cursor:default}
+  #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
+  main{padding-bottom:120px}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
 </style>
 </head>
@@ -74,6 +108,13 @@
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
 <main id="feed"><div class="empty" id="empty">waiting for the stream…</div></main>
+<div id="composer">
+  <div class="row">
+    <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
+    <button id="send" disabled>Send</button>
+  </div>
+  <div id="sendstat"></div>
+</div>
 
 <script>
 const feed = document.getElementById('feed');
@@ -92,9 +133,31 @@ function md(s){
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|\s)\*([^*\n]+)\*/g, '$1<em>$2</em>')
-    .replace(/\n/g, '<br>');
+    .replace(/^(#{1,4})\s+(.+)$/gm, (_, h, t) => `<div class="h h${h.length}">${t}</div>`)
+    .replace(/^[-*]\s+(.+)$/gm, '<div class="li">$1</div>')
+    .replace(/\n/g, '<br>')
+    // block-level divs supply their own spacing; drop the trailing <br>
+    .replace(/(<\/div>)<br>/g, '$1');
   return s.replace(/\0(\d+)\0/g, (_, i) => blocks[i]);
 }
+
+/** A one-line "what is it doing" for a collapsed tool chip. */
+function gist(tool, input){
+  if (!input || typeof input !== 'object') return '';
+  const t = String(tool||'');
+  const pick = (...keys) => { for (const k of keys) if (typeof input[k] === 'string' && input[k]) return input[k]; return ''; };
+  let v = '';
+  if (t === 'Bash')                       v = pick('command','description');
+  else if (/^(Read|Write|Edit|NotebookEdit)$/.test(t)) v = pick('file_path','notebook_path');
+  else if (/^(Grep|Glob)$/.test(t))       v = pick('pattern','query') + (input.path ? '  in ' + input.path : '');
+  else if (t === 'Task' || t === 'Agent') v = pick('description','subagent_type');
+  else if (t === 'WebFetch' || t === 'WebSearch') v = pick('url','query');
+  else v = pick('description','command','query','path','file_path','url');
+  if (!v) { const f = Object.values(input).find(x => typeof x === 'string' && x); v = f || ''; }
+  v = v.replace(/\s+/g,' ').trim();
+  return v.length > 96 ? v.slice(0,96) + '…' : v;
+}
+
 const clock = ts => { try { return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ''; } };
 const atBottom = () => window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
 function add(el){ const stick = atBottom(); feed.appendChild(el); if (stick) window.scrollTo(0, document.body.scrollHeight); }
@@ -129,13 +192,13 @@ function render(ev){
       if (ev.body?.blob_ref){
         const a = document.createElement('div');
         a.className = 'note';
-        a.innerHTML = `full output: <a href="/blob/${ev.body.blob_ref}" target="_blank">${ev.body.blob_ref}</a>`;
+        a.innerHTML = `full output: <a href="${BASE}/blob/${ev.body.blob_ref}" target="_blank">${ev.body.blob_ref}</a>`;
         card.appendChild(a);
       }
     } else {
       const d = document.createElement('details');
       d.className = 'tool ev';
-      d.innerHTML = `<summary>result (orphaned)</summary>`;
+      d.innerHTML = `<summary><strong>result</strong><span class="gist">tool call predates this mirror</span></summary>`;
       d.appendChild(pre); add(d);
     }
     return;
@@ -145,9 +208,11 @@ function render(ev){
     const d = document.createElement('details');
     d.className = 'tool ev';
     const input = JSON.stringify(ev.body?.input ?? {}, null, 2);
-    d.innerHTML = `<summary><strong>${ev.body?.tool || 'tool'}</strong>
+    const esc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    d.innerHTML = `<summary><strong>${esc(ev.body?.tool || 'tool')}</strong>
+                   <span class="gist">${esc(gist(ev.body?.tool, ev.body?.input))}</span>
                    <span class="pending">running…</span></summary>
-                   <pre>${input.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`;
+                   <pre>${esc(input)}</pre>`;
     if (ev.body?.tool_use_id) toolCards.set(ev.body.tool_use_id, d);
     add(d); return;
   }
@@ -183,16 +248,76 @@ function render(ev){
 // --- stream ------------------------------------------------------------------
 // EventSource handles Last-Event-ID and reconnection natively, which is exactly
 // why the server speaks plain SSE with id: <epoch>.<seq>.
-const es = new EventSource('/events');
-es.addEventListener('mirror', e => { try { render(JSON.parse(e.data)); } catch {} });
+const BASE = '__BASE_PATH__';
+const es = new EventSource(BASE + '/events');
+es.addEventListener('mirror', e => { try { const ev = JSON.parse(e.data); render(ev); confirmFromStream(ev); } catch {} });
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
 es.addEventListener('resync', () => { feed.innerHTML = ''; toolCards.clear(); });
 es.onopen = () => { dot.className = 'dot live'; };
 es.onerror = () => { dot.className = 'dot down'; stat.textContent = 'reconnecting…'; };
 
+
+// --- composer ----------------------------------------------------------------
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const sendStat = document.getElementById('sendstat');
+const DRAFT = 'mirror-draft';
+const pending = [];   // {text, at} awaiting confirmation FROM THE STREAM
+
+input.value = localStorage.getItem(DRAFT) || '';
+function resize(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,200)+'px'; }
+function refresh(){ sendBtn.disabled = !input.value.trim(); }
+input.addEventListener('input', () => { localStorage.setItem(DRAFT, input.value); resize(); refresh(); });
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+sendBtn.addEventListener('click', send);
+resize(); refresh();
+
+async function send(){
+  const text = input.value.trim();
+  if (!text) return;
+  sendBtn.disabled = true;
+  sendStat.textContent = 'sending…';
+  try{
+    const r = await fetch(BASE + '/send', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},   // non-simple: forces preflight
+      body: JSON.stringify({ text })
+    });
+    const out = await r.json().catch(()=>({}));
+    if (r.ok && out.ok){
+      input.value = ''; localStorage.removeItem(DRAFT); resize();
+      pending.push({ text, at: Date.now() });
+      // NOTE: "delivered" is DERIVED by watching the message reappear in the
+      // mirror stream. We never ask the instance to confirm anything (Law 9.1).
+      sendStat.textContent = 'queued — waiting for it to land in the session';
+    } else {
+      sendStat.textContent = `not sent: ${out.error || r.status}`;
+    }
+  } catch(err){
+    sendStat.textContent = `not sent: ${err.message}`;
+  }
+  refresh(); input.focus();
+}
+
+/** Called for every inbound event — confirms our own sends by observation. */
+function confirmFromStream(ev){
+  if (ev.type !== 'user_message') return;
+  const body = (ev.body?.text || '');
+  for (let i = pending.length - 1; i >= 0; i--){
+    if (body.includes(pending[i].text.slice(0, 60))){
+      const ms = Date.now() - pending[i].at;
+      pending.splice(i,1);
+      sendStat.textContent = `delivered to the session (${ms} ms)`;
+      setTimeout(()=>{ if(!pending.length) sendStat.textContent=''; }, 4000);
+    }
+  }
+}
+
 setInterval(async () => {
   try{
-    const h = await (await fetch('/health')).json();
+    const h = await (await fetch(BASE + '/health')).json();
     document.getElementById('title').textContent = `${h.instance} · session mirror`;
     document.title = `${h.instance} · mirror`;
     const age = h.last_event_age_s;
