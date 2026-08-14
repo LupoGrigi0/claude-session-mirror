@@ -65,12 +65,30 @@ export const KNOWN_BLOCK_TYPES = new Set(['text', 'thinking', 'tool_use', 'tool_
  * @returns {{text: string, from: string|null}}
  */
 export function unwrapChannelEnvelope(raw) {
-  const m = /^\s*\[channel message from ([^\]]+)\]\s*\n?/.exec(raw);
-  if (!m) return { text: raw, from: null };
-  let text = raw.slice(m[0].length);
-  // Drop the trailing "[To answer ...]" guidance block, however it wraps.
+  let text = String(raw ?? '');
+  let from = null;
+
+  // Layer 1 — the <channel …> XML wrapper the transcript actually stores.
+  // Its from= attribute is the most reliable sender we get, so prefer it.
+  const xml = /^\s*<channel\s+([^>]*)>\s*\n?/.exec(text);
+  if (xml) {
+    const attr = /\bfrom="([^"]*)"/.exec(xml[1]);
+    if (attr) from = attr[1];
+    text = text.slice(xml[0].length).replace(/\n*<\/channel>\s*$/, '');
+  }
+
+  // Layer 2 — the human-readable "[channel message from X]" header.
+  const hdr = /^\s*\[channel message from ([^\]]+)\]\s*\n?/.exec(text);
+  if (hdr) {
+    from = from || hdr[1].trim();
+    text = text.slice(hdr[0].length);
+  }
+
+  // Layer 3 — the async reply guidance. Wrong for a browser conversation (the
+  // human is watching this very stream) and pure noise in their own bubble.
   text = text.replace(/\n*\[To answer [\s\S]*$/, '');
-  return { text: text.trim(), from: m[1].trim() };
+
+  return { text: text.trim(), from };
 }
 
 export function normalizeEntry(entry, ctx = {}) {

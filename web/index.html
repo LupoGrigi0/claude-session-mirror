@@ -266,6 +266,7 @@ const sendBtn = document.getElementById('send');
 const sendStat = document.getElementById('sendstat');
 const DRAFT = 'mirror-draft';
 const pending = [];   // {text, at} awaiting confirmation FROM THE STREAM
+let inFlight = false;
 
 input.value = localStorage.getItem(DRAFT) || '';
 function resize(){
@@ -287,9 +288,14 @@ sendBtn.addEventListener('click', send);
 resize(); refresh();
 
 async function send(){
+  if (inFlight) return;                     // a second tap must not re-send
   const text = input.value.trim();
   if (!text) return;
+  inFlight = true;
   sendBtn.disabled = true;
+  // Clear optimistically: leaving the text in place is what let a double-tap
+  // fire twice. Restored below if the send actually fails.
+  input.value = ''; localStorage.removeItem(DRAFT); resize();
   sendStat.textContent = 'sending…';
   try{
     const r = await fetch(BASE + '/send', {
@@ -299,17 +305,19 @@ async function send(){
     });
     const out = await r.json().catch(()=>({}));
     if (r.ok && out.ok){
-      input.value = ''; localStorage.removeItem(DRAFT); resize();
       pending.push({ text, at: Date.now() });
       // NOTE: "delivered" is DERIVED by watching the message reappear in the
       // mirror stream. We never ask the instance to confirm anything (Law 9.1).
       sendStat.textContent = 'queued — waiting for it to land in the session';
     } else {
+      input.value = text; resize();          // give it back so nothing is lost
       sendStat.textContent = `not sent: ${out.error || r.status}`;
     }
   } catch(err){
+    input.value = text; resize();
     sendStat.textContent = `not sent: ${err.message}`;
   }
+  inFlight = false;
   refresh(); input.focus();
 }
 
