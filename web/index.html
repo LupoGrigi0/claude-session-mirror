@@ -102,6 +102,9 @@
   #send{background:var(--cairn);color:#12131c;border:0;border-radius:10px;
         padding:0 18px;height:42px;font-weight:700;cursor:pointer;flex:none}
   #send:disabled{opacity:.4;cursor:default}
+  #entertoggle{font:10px/1 var(--mono);color:var(--faint);background:none;border:1px solid var(--line);
+               border-radius:4px;padding:4px 7px;cursor:pointer;flex:none}
+  #entertoggle.on{color:var(--cairn);border-color:var(--cairn)}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
   main{padding-bottom:120px}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
@@ -118,6 +121,7 @@
 <div id="composer">
   <div class="row">
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
+    <button id="entertoggle" title="Toggle whether Enter sends"></button>
     <button id="send" disabled>Send</button>
   </div>
   <div id="sendstat"></div>
@@ -292,7 +296,33 @@ function resize(){
 }
 function refresh(){ sendBtn.disabled = !input.value.trim(); }
 input.addEventListener('input', () => { localStorage.setItem(DRAFT, input.value); resize(); refresh(); });
+// Enter-to-send: on by default on a physical keyboard, off on touch.
+// Android's virtual keyboard reports composition keycodes (229 / 'Unidentified')
+// rather than a real Enter, so it never fired there anyway — the behaviour was
+// accidental, and the placeholder was claiming otherwise. Now it's deliberate,
+// stated honestly, and switchable, because the right answer differs per device.
+const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+const ENTER_KEY = 'mirror-enter-sends';
+let enterSends = localStorage.getItem(ENTER_KEY) === null ? !isTouch
+                                                          : localStorage.getItem(ENTER_KEY) === '1';
+const enterBtn = document.getElementById('entertoggle');
+function applyEnterMode(){
+  enterBtn.textContent = enterSends ? '\u23CE sends' : '\u23CE newline';
+  enterBtn.classList.toggle('on', enterSends);
+  input.placeholder = enterSends
+    ? 'Message Cairn\u2026  (Enter to send, Shift+Enter for a newline)'
+    : 'Message Cairn\u2026  (Enter for a newline, tap Send)';
+}
+enterBtn.addEventListener('click', () => {
+  enterSends = !enterSends;
+  localStorage.setItem(ENTER_KEY, enterSends ? '1' : '0');
+  applyEnterMode(); input.focus();
+});
+applyEnterMode();
+
 input.addEventListener('keydown', e => {
+  if (!enterSends) return;                      // Enter is a newline; Send sends
+  if (e.isComposing || e.keyCode === 229) return;   // IME / virtual keyboard
   if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
 sendBtn.addEventListener('click', send);
