@@ -250,7 +250,10 @@ const server = http.createServer(async (req, res) => {
         }),
       });
       const out = await r.json().catch(() => ({}));
-      log(`send from ${senderAddress(who)} [${who.source}] -> ${r.status}`);
+      const ci = describeClient(req, url);
+      log(`send from ${senderAddress(who)} [${who.source}] `
+        + `via ${ci.platform}${ci.mobile ? '/mobile' : ''}`
+        + `${ci.viewport ? ' ' + ci.viewport : ''} -> ${r.status}`);
       res.writeHead(r.ok ? 200 : 502, { 'Content-Type': 'application/json' })
          .end(JSON.stringify({ ok: r.ok, nonce, identity_source: who.source, channel: out }));
     } catch (err) {
