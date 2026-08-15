@@ -24,6 +24,12 @@
   .dot.down{background:var(--err)}
   h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
   .meta{margin-left:auto;font:12px/1 var(--mono);color:var(--faint);text-align:right}
+  #ctx{display:flex;align-items:center;gap:7px;font:11px/1 var(--mono);color:var(--dim)}
+  #ctxbar{width:110px;height:6px;border-radius:3px;background:var(--raised);
+          border:1px solid var(--line);overflow:hidden}
+  #ctxfill{height:100%;width:0;background:var(--human);transition:width .4s,background .4s}
+  #ctxfill.warm{background:var(--tool)} #ctxfill.hot{background:var(--err)}
+  @media (max-width:640px){ #ctxbar{width:56px} #ctxmodel{display:none} }
   #viewers{display:flex;gap:5px;align-items:center}
   .viewer{font:10px/1 var(--mono);padding:3px 6px;border-radius:4px;
           background:var(--raised);border:1px solid var(--line);color:var(--dim)}
@@ -114,6 +120,7 @@
 <header>
   <span class="dot" id="dot"></span>
   <h1 id="title">session mirror</h1>
+  <div id="ctx"><span id="ctxmodel"></span><span id="ctxbar"><span id="ctxfill"></span></span><span id="ctxpct"></span></div>
   <div id="viewers"></div>
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
@@ -393,6 +400,19 @@ setInterval(async () => {
         const isMe = c.viewport === mine;
         return `<span class="viewer${isMe ? ' me' : ''}">${label}${isMe ? ' (this one)' : ''}</span>`;
       }).join('');
+    // Context meter, straight out of the transcript's own usage records.
+    if (h.session){
+      const pct = h.session.context_pct;
+      document.getElementById('ctxmodel').textContent = (h.session.model || '').replace(/^claude-/, '');
+      document.getElementById('ctxpct').textContent =
+        `${(h.session.context_tokens/1000).toFixed(0)}k · ${pct}%`;
+      const fill = document.getElementById('ctxfill');
+      fill.style.width = Math.min(100, pct) + '%';
+      fill.className = pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : '';
+      document.getElementById('ctx').title =
+        `${h.session.context_tokens.toLocaleString()} of ${h.session.context_window.toLocaleString()} tokens`
+        + ` (raw API total; Claude Code's /context buckets differently)`;
+    }
     const age = h.last_event_age_s;
     stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`;
     // Liveness is judged from event age, never from ok:true — /health has

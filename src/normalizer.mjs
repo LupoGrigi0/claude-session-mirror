@@ -254,3 +254,33 @@ export function schemaCanary(sampleLines) {
     stats: { parsed, unparseable, types: [...seenTypes], blocks: [...seenBlocks] },
   };
 }
+
+/**
+ * Pull context accounting out of an assistant entry.
+ *
+ * Every assistant turn records what the API actually received, so the context
+ * meter comes free from the file we already tail — no statusline script, no
+ * extra process, no cost to the session.
+ *
+ * NOTE: this is the raw API total (fresh input + cache creation + cache reads +
+ * output). Claude Code's own /context reports a smaller number because it
+ * buckets differently. Label it as API context; do not claim they match.
+ */
+export function readUsage(entry) {
+  if (entry?.type !== 'assistant') return null;
+  const m = entry.message || {};
+  const u = m.usage;
+  if (!u) return null;
+  const total = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0)
+              + (u.cache_read_input_tokens || 0) + (u.output_tokens || 0);
+  if (!total) return null;
+  return {
+    model: m.model || null,
+    total,
+    input: u.input_tokens || 0,
+    cache_read: u.cache_read_input_tokens || 0,
+    cache_write: u.cache_creation_input_tokens || 0,
+    output: u.output_tokens || 0,
+    at: entry.timestamp || new Date().toISOString(),
+  };
+}

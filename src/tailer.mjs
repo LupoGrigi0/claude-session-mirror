@@ -18,7 +18,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeEntry } from './normalizer.mjs';
+import { normalizeEntry, readUsage } from './normalizer.mjs';
 
 const POLL_MS = 250;
 
@@ -30,7 +30,8 @@ export class TranscriptTailer {
    * @param {(events: object[]) => void} opts.onEvents
    * @param {(msg: string) => void} [opts.log]
    */
-  constructor({ transcriptPath, ctx, onEvents, log = () => {} }) {
+  constructor({ transcriptPath, ctx, onEvents, onUsage = () => {}, log = () => {} }) {
+    this.onUsage = onUsage;
     this.transcriptPath = transcriptPath;
     this.ctx = ctx;
     this.onEvents = onEvents;
@@ -140,6 +141,12 @@ export class TranscriptTailer {
       catch { continue; } // unparseable: skip, never fatal (Law 4.2)
       try { out.push(...normalizeEntry(entry, state.ctx)); }
       catch (err) { this.log(`normalize error: ${err.message}`); }
+      // Context accounting rides along in the transcript — no statusline
+      // script needed, and it is what the API actually received.
+      if (!state.ctx.agentId) {
+        const u = readUsage(entry);
+        if (u) { try { this.onUsage(u); } catch { /* never break the tail */ } }
+      }
     }
     if (out.length) this.onEvents(out);
   }

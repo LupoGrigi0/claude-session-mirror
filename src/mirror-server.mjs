@@ -78,6 +78,8 @@ try {
 
 // --- health/observability counters -------------------------------------------
 const stats = { hooks: 0, events: 0, clients: 0, dropped: 0, lastEventAt: null, startedAt: Date.now() };
+let usage = null;   // latest context accounting, straight from the transcript
+const CONTEXT_WINDOW = Number(process.env.MIRROR_CONTEXT_WINDOW || 1_000_000);
 
 // --- the tailer is the source of CONTENT -------------------------------------
 const tailer = new TranscriptTailer({
@@ -90,6 +92,7 @@ const tailer = new TranscriptTailer({
     // Replaced by the real resolver the moment authentication is in front.
     speaker: stubIdentity() || { id: 'user', kind: 'human', display: 'User' },
   },
+  onUsage: (u) => { usage = u; },
   onEvents: (events) => {
     for (const ev of events) {
       const stored = eventLog.append(ev);
@@ -280,6 +283,14 @@ const server = http.createServer(async (req, res) => {
       last_event_age_s: lastAge,
       counters: { ...stats },
       uptime_s: Math.round((Date.now() - stats.startedAt) / 1000),
+      session: usage ? {
+        model: usage.model,
+        context_tokens: usage.total,
+        context_window: CONTEXT_WINDOW,
+        context_pct: +(100 * usage.total / CONTEXT_WINDOW).toFixed(1),
+        cached: usage.cache_read,
+        at: usage.at,
+      } : null,
       write_path: {
         channel_url: cfg.channelUrl || null,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
