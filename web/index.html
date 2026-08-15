@@ -24,6 +24,11 @@
   .dot.down{background:var(--err)}
   h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
   .meta{margin-left:auto;font:12px/1 var(--mono);color:var(--faint);text-align:right}
+  #viewers{display:flex;gap:5px;align-items:center}
+  .viewer{font:10px/1 var(--mono);padding:3px 6px;border-radius:4px;
+          background:var(--raised);border:1px solid var(--line);color:var(--dim)}
+  .viewer.me{border-color:var(--cairn);color:var(--cairn)}
+  @media (max-width:520px){ .viewer{display:none} .viewer.count{display:inline} }
   main{max-width:920px;margin:0 auto;padding:18px 16px 90px}
 
   .ev{margin:14px 0;animation:in .18s ease-out}
@@ -106,6 +111,7 @@
 <header>
   <span class="dot" id="dot"></span>
   <h1 id="title">session mirror</h1>
+  <div id="viewers"></div>
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
 <main id="feed"><div class="empty" id="empty">waiting for the stream…</div></main>
@@ -345,6 +351,18 @@ setInterval(async () => {
     const h = await (await fetch(BASE + '/health')).json();
     document.getElementById('title').textContent = `${h.instance} · session mirror`;
     document.title = `${h.instance} · mirror`;
+    // Who else is watching. Two browsers can both type into one live session
+    // and there is no serialization between them — seeing the other one is the
+    // minimum honest mitigation.
+    const vs = h.connected || [];
+    const box = document.getElementById('viewers');
+    const mine = `${window.innerWidth}x${window.innerHeight}`;
+    box.innerHTML = vs.length < 2 ? '' :
+      `<span class="viewer count">${vs.length} viewers</span>` + vs.map(c => {
+        const label = c.mobile ? 'phone' : (c.platform || 'desktop').toLowerCase();
+        const isMe = c.viewport === mine;
+        return `<span class="viewer${isMe ? ' me' : ''}">${label}${isMe ? ' (this one)' : ''}</span>`;
+      }).join('');
     const age = h.last_event_age_s;
     stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`;
     // Liveness is judged from event age, never from ok:true — /health has
