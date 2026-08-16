@@ -80,6 +80,7 @@ try {
 const stats = { hooks: 0, events: 0, clients: 0, dropped: 0, lastEventAt: null, startedAt: Date.now() };
 let usage = null;   // latest context accounting, straight from the transcript
 const CONTEXT_WINDOW = Number(process.env.MIRROR_CONTEXT_WINDOW || 1_000_000);
+const REPLAY_LIMIT   = Number(process.env.MIRROR_REPLAY_LIMIT || 300);
 
 // --- the tailer is the source of CONTENT -------------------------------------
 const tailer = new TranscriptTailer({
@@ -121,6 +122,7 @@ function sseWrite(client, ev) {
     client.queued++;
     if (client.queued > MAX_CLIENT_BACKLOG) {
       stats.dropped++;
+      stats.clients = Math.max(0, clients.size - 1);
       log('client overflow — disconnecting; it will replay via Last-Event-ID');
       try {
         client.res.write(`event: overflow\ndata: {"reason":"backlog"}\n\n`);
@@ -281,6 +283,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- GET /history?before=<seq> : a page of older events, for scrolling up
+  if (req.method === 'GET' && p === '/history') {
+    const before = Number(url.searchParams.get('before') || 0);
+    const limit = Math.min(500, Number(url.searchParams.get('limit') || 150));
+    const page = before > 0 ? eventLog.history(before, limit) : [];
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      events: page,
+      first_seq: page.length ? page[0].seq : null,
+      more: page.length ? page[0].seq > 1 : false,
+    }));
+    return;
+  }
+
   if (req.method === 'GET' && p === '/health') {
     const lastAge = stats.lastEventAt ? Math.round((Date.now() - stats.lastEventAt) / 1000) : null;
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -340,7 +356,15 @@ const server = http.createServer(async (req, res) => {
     log(`client: ${client.info.platform}${client.info.mobile ? ' (mobile)' : ''}`
       + `${client.info.viewport ? ' ' + client.info.viewport : ''}`
       + `${client.info.dpr ? ' @' + client.info.dpr + 'x' : ''}`);
-    for (const ev of eventLog.replay(afterSeq)) sseWrite(client, ev);
+    const backlog = eventLog.replay(afterSeq, REPLAY_LIMIT);
+    if (backlog.length) {
+      // Tell the client where the window starts so it can offer "load earlier"
+      // rather than silently pretending this is the whole conversation.
+      sseWrite(client, { epoch: eventLog.epoch, seq: backlog[0].seq - 1,
+                         type: 'window_start', ts: new Date().toISOString(),
+                         body: { first_seq: backlog[0].seq, more: backlog[0].seq > 1 } });
+    }
+    for (const ev of backlog) sseWrite(client, ev);
     clients.add(client);
     stats.clients = clients.size;
     log(`client attached (from seq ${afterSeq}); ${clients.size} total`);

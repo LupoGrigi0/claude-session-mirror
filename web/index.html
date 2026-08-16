@@ -127,6 +127,11 @@
   #entertoggle.on{color:var(--cairn);border-color:var(--cairn)}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
   main{padding-bottom:120px}
+  #earlier{display:none;margin:8px auto 16px;padding:7px 14px;cursor:pointer;
+           background:var(--raised);color:var(--dim);border:1px solid var(--line);
+           border-radius:8px;font:12px var(--mono)}
+  #earlier:hover{color:var(--fg);border-color:var(--cairn)}
+  #earlier.show{display:block}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
 </style>
 </head>
@@ -138,7 +143,7 @@
   <div id="viewers"></div>
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
-<main id="feed"><div class="empty" id="empty">waiting for the stream…</div></main>
+<main id="feed"><button id="earlier">load earlier</button><div class="empty" id="empty">waiting for the stream…</div></main>
 <div id="composer">
   <div class="row">
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
@@ -209,7 +214,54 @@ function gist(tool, input){
 
 const clock = ts => { try { return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ''; } };
 const atBottom = () => window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
-function add(el){ const stick = atBottom(); feed.appendChild(el); if (stick) window.scrollTo(0, document.body.scrollHeight); }
+// The feed is capped: an append-only DOM pins every node alive, and this tab
+// stays open for days. Trim from the top on live appends; "load earlier"
+// deliberately reaches back when you actually want history.
+const MAX_NODES = 1200;
+function add(el){
+  if (__target){ __target.appendChild(el); return; }
+  const stick = atBottom();
+  feed.appendChild(el);
+  while (feed.children.length > MAX_NODES + 2) {
+    const first = feed.children[2];      // keep #earlier and #empty slots
+    if (!first) break;
+    first.remove();
+  }
+  if (stick) window.scrollTo(0, document.body.scrollHeight);
+}
+
+/** Prepend a page of older events without yanking the scroll position. */
+function prepend(nodes){
+  const anchor = document.body.scrollHeight - window.scrollY;
+  const frag = document.createDocumentFragment();
+  nodes.forEach(n => frag.appendChild(n));
+  feed.insertBefore(frag, document.getElementById('earlier').nextSibling);
+  window.scrollTo(0, document.body.scrollHeight - anchor);
+}
+
+let earliestSeq = null, loadingEarlier = false;
+const earlierBtn = document.getElementById('earlier');
+earlierBtn.addEventListener('click', async () => {
+  if (loadingEarlier || !earliestSeq) return;
+  loadingEarlier = true;
+  earlierBtn.textContent = 'loading…';
+  try{
+    const r = await fetch(`${BASE}/history?before=${earliestSeq}&limit=150`);
+    const d = await r.json();
+    const built = [];
+    // Render into a detached buffer, then splice it in above the fold.
+    for (const ev of d.events){
+      const probe = document.createElement('div');
+      renderInto(probe, ev);
+      while (probe.firstChild) built.push(probe.firstChild);
+    }
+    if (built.length) prepend(built);
+    earliestSeq = d.first_seq ?? earliestSeq;
+    earlierBtn.classList.toggle('show', Boolean(d.more));
+    earlierBtn.textContent = 'load earlier';
+  } catch { earlierBtn.textContent = 'load earlier'; }
+  loadingEarlier = false;
+});
 
 function header(ev, extra){
   const kind = ev.from?.kind || 'system';
@@ -221,8 +273,11 @@ function header(ev, extra){
   return { wrap: kind, node: w };
 }
 
-function render(ev){
-  count++; lastAt = Date.now();
+let __target = null;   // when set, add() builds into this instead of the feed
+function renderInto(container, ev){ __target = container; try { render(ev, true); } finally { __target = null; } }
+
+function render(ev, quiet){
+  if (!quiet){ count++; lastAt = Date.now(); }
   document.getElementById('empty')?.remove();
 
   if (ev.type === 'tool_result'){
@@ -321,7 +376,20 @@ const clientParams = new URLSearchParams({
   touch: ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? '1' : '0',
 });
 const es = new EventSource(BASE + '/events?' + clientParams);
-es.addEventListener('mirror', e => { try { const ev = JSON.parse(e.data); render(ev); confirmFromStream(ev); } catch {} });
+es.addEventListener('mirror', e => {
+  try {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'window_start'){
+      // The server sent a bounded tail, not the whole log. Say so honestly
+      // rather than letting a partial view look complete.
+      earliestSeq = ev.body?.first_seq ?? null;
+      earlierBtn.classList.toggle('show', Boolean(ev.body?.more));
+      return;
+    }
+    if (earliestSeq === null) earliestSeq = ev.seq;
+    render(ev); confirmFromStream(ev);
+  } catch {}
+});
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
 es.addEventListener('resync', () => { feed.innerHTML = ''; toolCards.clear(); });
 es.onopen = () => { dot.className = 'dot live'; };

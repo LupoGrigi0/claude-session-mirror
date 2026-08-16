@@ -91,16 +91,59 @@ export class EventLog {
     return stored;
   }
 
-  /** Replay everything after `afterSeq` (0 = from the beginning). */
-  *replay(afterSeq = 0) {
-    let raw;
-    try { raw = fs.readFileSync(this.logPath, 'utf8'); } catch { return; }
-    for (const line of raw.split('\n')) {
-      if (!line) continue;
+  /**
+   * Read a window of lines from the END of the log without loading the file.
+   *
+   * The log is append-only and never rotated — it passed 3.6 MB in three days.
+   * Reading it whole on every connect blocked the event loop, and a phone that
+   * wakes and retries does exactly that. Grows the read window until it has
+   * enough lines or hits the head.
+   */
+  _tailLines(wanted) {
+    let size;
+    try { size = fs.statSync(this.logPath).size; } catch { return []; }
+    if (!size) return [];
+    const fd = fs.openSync(this.logPath, 'r');
+    try {
+      let window = 64 * 1024, lines = [];
+      while (true) {
+        const start = Math.max(0, size - window);
+        const buf = Buffer.alloc(size - start);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        lines = buf.toString('utf8').split('\n').filter(Boolean);
+        // A partial first line is expected unless we reached the head.
+        if (start > 0) lines.shift();
+        if (lines.length >= wanted || start === 0 || window > 32 * 1024 * 1024) break;
+        window *= 4;
+      }
+      return lines.slice(-wanted);
+    } finally { fs.closeSync(fd); }
+  }
+
+  /**
+   * Events after `afterSeq`, newest-biased and always bounded.
+   * A fresh client gets the tail; a reconnect gets what it missed.
+   */
+  replay(afterSeq = 0, limit = 300) {
+    const out = [];
+    for (const line of this._tailLines(limit * 3)) {
       let ev;
       try { ev = JSON.parse(line); } catch { continue; } // torn line: skip, never fatal
-      if (ev.seq > afterSeq) yield ev;
+      if (ev.seq > afterSeq) out.push(ev);
     }
+    return out.slice(-limit);
+  }
+
+  /** A page of history strictly BEFORE `beforeSeq`, for scrolling upward. */
+  history(beforeSeq, limit = 150) {
+    const out = [];
+    // Scan far enough back to be likely to cover the page; bounded either way.
+    for (const line of this._tailLines(Math.max(2000, limit * 20))) {
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.seq < beforeSeq) out.push(ev);
+    }
+    return out.slice(-limit);
   }
 
   subscribe(fn) {
@@ -127,7 +170,7 @@ export function truncateEvent(event, blobDir) {
   if (!biggest) return event;
 
   const full = body[biggest];
-  const ref = `${event.seq}-${biggest}.txt`;
+  const ref = `${event.epoch || 0}-${event.seq}-${biggest}.txt`;
   try {
     fs.writeFileSync(path.join(blobDir, ref), full);
   } catch {
