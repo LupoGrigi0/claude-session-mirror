@@ -29,6 +29,7 @@ import { EventLog } from './eventlog.mjs';
 import { TranscriptTailer } from './tailer.mjs';
 import { schemaCanary } from './normalizer.mjs';
 import { resolveIdentity, senderAddress, stubIdentity } from './identity.mjs';
+import { execFile } from 'node:child_process';
 
 const cfg = {
   instance:   process.env.MIRROR_INSTANCE   || 'unknown',
@@ -45,6 +46,9 @@ const cfg = {
   // The instance's own channel server — where a browser message is injected.
   channelUrl:   process.env.MIRROR_CHANNEL_URL || '',
   threadId:     process.env.MIRROR_THREAD_ID || 'web',
+  // tmux session to interrupt. Defaults to the instance id, which is the
+  // chassis convention. Empty string disables the stop button entirely.
+  tmuxSession:  process.env.MIRROR_TMUX_SESSION ?? (process.env.MIRROR_INSTANCE || ''),
 };
 
 /** Strip the base path; returns null when the request isn't ours. */
@@ -284,6 +288,40 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ---- GET /history?before=<seq> : a page of older events, for scrolling up
+
+  // ---- POST /interrupt : send ESC to the session's tmux pane.
+  //
+  // This is console access and is treated as such: same-origin, JSON only,
+  // authenticated, and it can send EXACTLY ONE fixed keystroke. There is no
+  // parameter for what to send — a button that can type arbitrary keys into a
+  // live pane is a remote shell, and this is not that.
+  //
+  // It exists because the browser can be reachable when SSH is not. On
+  // 2026-08-16 ssh to this host was down while the tailnet stayed up, which
+  // meant the only way to interrupt a running turn was unavailable.
+  if (req.method === 'POST' && p === '/interrupt') {
+    if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+    if (!/^application\/json/i.test(req.headers['content-type'] || '')) {
+      res.writeHead(415).end('content-type must be application/json'); return;
+    }
+    const who = resolveIdentity(req);
+    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!cfg.tmuxSession) {
+      res.writeHead(503, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'no tmux session configured' })); return;
+    }
+    await readBody(req);
+    const done = await new Promise(resolve => {
+      execFile('tmux', ['send-keys', '-t', cfg.tmuxSession, 'Escape'],
+        { timeout: 4000 },
+        (err, _out, stderr) => resolve(err ? { ok:false, error: (stderr || err.message).trim() }
+                                            : { ok:true }));
+    });
+    log(`interrupt by ${senderAddress(who)} [${who.source}] -> ${done.ok ? 'sent' : done.error}`);
+    res.writeHead(done.ok ? 200 : 502, {'Content-Type':'application/json'}).end(JSON.stringify(done));
+    return;
+  }
+
   if (req.method === 'GET' && p === '/history') {
     const before = Number(url.searchParams.get('before') || 0);
     const limit = Math.min(500, Number(url.searchParams.get('limit') || 150));
@@ -323,6 +361,7 @@ const server = http.createServer(async (req, res) => {
       } : null,
       write_path: {
         channel_url: cfg.channelUrl || null,
+        interrupt: Boolean(cfg.tmuxSession),
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
       },

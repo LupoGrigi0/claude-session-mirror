@@ -122,6 +122,10 @@
   #send{background:var(--cairn);color:#12131c;border:0;border-radius:10px;
         padding:0 18px;height:42px;font-weight:700;cursor:pointer;flex:none}
   #send:disabled{opacity:.4;cursor:default}
+  #stop{background:none;color:var(--err);border:1px solid var(--err);border-radius:10px;
+        padding:0 14px;height:42px;font-weight:700;cursor:pointer;flex:none;display:none}
+  #stop.show{display:block}
+  #stop:active{background:var(--err);color:#12131c}
   #entertoggle{font:10px/1 var(--mono);color:var(--faint);background:none;border:1px solid var(--line);
                border-radius:4px;padding:4px 7px;cursor:pointer;flex:none}
   #entertoggle.on{color:var(--cairn);border-color:var(--cairn)}
@@ -147,6 +151,7 @@
 <div id="composer">
   <div class="row">
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
+    <button id="stop" title="Interrupt the current turn (sends ESC)">Stop</button>
     <button id="entertoggle" title="Toggle whether Enter sends"></button>
     <button id="send" disabled>Send</button>
   </div>
@@ -517,6 +522,24 @@ function confirmFromStream(ev){
   }
 }
 
+// --- stop -------------------------------------------------------------------
+// The browser can be reachable when SSH is not — that happened on 2026-08-16,
+// leaving no way to interrupt a running turn. This sends exactly one keystroke.
+const stopBtn = document.getElementById('stop');
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+  const was = stopBtn.textContent;
+  stopBtn.textContent = '…';
+  try{
+    const r = await fetch(BASE + '/interrupt', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const d = await r.json().catch(()=>({}));
+    sendStat.textContent = d.ok ? 'interrupt sent' : `interrupt failed: ${d.error || r.status}`;
+  } catch(err){ sendStat.textContent = `interrupt failed: ${err.message}`; }
+  stopBtn.textContent = was; stopBtn.disabled = false;
+  setTimeout(()=>{ if(/interrupt/.test(sendStat.textContent)) sendStat.textContent=''; }, 4000);
+});
+
 // --- favicon -----------------------------------------------------------------
 // Three mirrors open side by side look identical in the tab strip. Give each a
 // badge with its own initial and a hue derived from the instance name — and
@@ -575,6 +598,11 @@ setInterval(async () => {
         `${h.session.context_tokens.toLocaleString()} of ${h.session.context_window.toLocaleString()} tokens`
         + ` (raw API total; Claude Code's /context buckets differently)`;
     }
+    // Offer Stop only when the session looks busy — a turn is in flight if
+    // something happened in the last ~45s. Always available if input is on and
+    // we simply can't tell.
+    const busy = h.last_event_age_s !== null && h.last_event_age_s < 45;
+    stopBtn.classList.toggle('show', Boolean(h.write_path?.interrupt) && busy);
     const age = h.last_event_age_s;
     stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`;
     // Liveness is judged from event age, never from ok:true — /health has
