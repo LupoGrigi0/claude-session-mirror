@@ -203,6 +203,10 @@ function render(ev){
     // Attach to its originating call rather than making a new bubble — the
     // result is part of the tool card, not a separate speaker's turn.
     const card = toolCards.get(ev.body?.tool_use_id);
+    // Once paired, the card is reachable from the DOM and the id will never be
+    // seen again — holding it forever leaks one entry per tool call across a
+    // long-lived tab. Drop it.
+    if (card) toolCards.delete(ev.body.tool_use_id);
     const out = (ev.body?.output || '').trim() || '(no output)';
     const pre = document.createElement('pre');
     pre.textContent = ev.body?.truncated
