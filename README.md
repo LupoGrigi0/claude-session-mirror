@@ -78,6 +78,21 @@ is not a preference — it was measured:
   and in a real 890-line transcript 10 of 14 entry types were not conversation
   at all.
 
+## Known issue: two writers
+
+A session can be driven from the browser **and** from `tmux attach` at the same
+time, and nothing serializes them. Both are legitimate inputs; neither knows the
+other exists. Send from both within a second and the order the model perceives
+is not necessarily the order you intended — and pressing ESC in the terminal
+will interrupt a turn the browser started.
+
+The UI shows other connected *browsers* in the header, but it cannot see a
+terminal at all.
+
+**Use one window per instance at a time.** This is a documented limitation, not
+a bug we are working around: fixing it properly means arbitrating writes into a
+live session, which is a larger design than the value it would return today.
+
 ## Known limits
 
 - **Thinking content is unavailable.** Blocks persist as structure only —

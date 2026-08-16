@@ -243,6 +243,9 @@ let earliestSeq = null, loadingEarlier = false;
 const earlierBtn = document.getElementById('earlier');
 earlierBtn.addEventListener('click', async () => {
   if (loadingEarlier || !earliestSeq) return;
+  const guard = setTimeout(() => {           // never leave it stuck on 'loading…'
+    loadingEarlier = false; earlierBtn.textContent = 'load earlier (retry)';
+  }, 10000);
   loadingEarlier = true;
   earlierBtn.textContent = 'loading…';
   try{
@@ -253,13 +256,16 @@ earlierBtn.addEventListener('click', async () => {
     for (const ev of d.events){
       const probe = document.createElement('div');
       renderInto(probe, ev);
-      while (probe.firstChild) built.push(probe.firstChild);
+      // removeChild DETACHES and returns it. Reading .firstChild without
+      // removing spins forever and freezes the tab.
+      while (probe.firstChild) built.push(probe.removeChild(probe.firstChild));
     }
     if (built.length) prepend(built);
     earliestSeq = d.first_seq ?? earliestSeq;
     earlierBtn.classList.toggle('show', Boolean(d.more));
     earlierBtn.textContent = 'load earlier';
-  } catch { earlierBtn.textContent = 'load earlier'; }
+  } catch (err) { earlierBtn.textContent = 'load earlier (failed)'; console.error(err); }
+  clearTimeout(guard);
   loadingEarlier = false;
 });
 
@@ -511,6 +517,33 @@ function confirmFromStream(ev){
   }
 }
 
+// --- favicon -----------------------------------------------------------------
+// Three mirrors open side by side look identical in the tab strip. Give each a
+// badge with its own initial and a hue derived from the instance name — and
+// colour it by context pressure, so a BACKGROUND tab can warn you. Lupo found
+// Axiom at 88% by opening her tab; the tab should have said so first.
+let faviconState = '';
+function setFavicon(name, pct){
+  const key = `${name}|${pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : 'ok'}`;
+  if (key === faviconState) return;          // repainting every poll is wasteful
+  faviconState = key;
+  const initial = (name || '?').trim()[0].toUpperCase();
+  let hue = 0; for (const ch of name || '') hue = (hue * 31 + ch.charCodeAt(0)) % 360;
+  const ring = pct >= 85 ? '#f7768e' : pct >= 65 ? '#e0af68' : '#9ece6a';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+    <rect width="64" height="64" rx="14" fill="hsl(${hue},45%,28%)"/>
+    <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="5"
+            stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
+            transform="rotate(-90 32 32)"/>
+    <text x="32" y="42" font-family="system-ui,sans-serif" font-size="28"
+          font-weight="700" fill="#e6ecff" text-anchor="middle">${initial}</text>
+  </svg>`;
+  let link = document.querySelector('link[rel="icon"]');
+  if (!link){ link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+  link.type = 'image/svg+xml';
+  link.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
 setInterval(async () => {
   try{
     const h = await (await fetch(BASE + '/health')).json();
@@ -537,6 +570,7 @@ setInterval(async () => {
       const fill = document.getElementById('ctxfill');
       fill.style.width = Math.min(100, pct) + '%';
       fill.className = pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : '';
+      setFavicon(h.instance || 'mirror', pct);
       document.getElementById('ctx').title =
         `${h.session.context_tokens.toLocaleString()} of ${h.session.context_window.toLocaleString()} tokens`
         + ` (raw API total; Claude Code's /context buckets differently)`;
