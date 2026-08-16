@@ -54,6 +54,11 @@ function decodeHeader(v) {
  * @returns {Participant|null}
  */
 export function fromTailscaleHeaders(headers) {
+  // These are only unforgeable when traffic passes THROUGH tailscale serve,
+  // which strips client-supplied copies. Bound directly to a tailnet IP nothing
+  // strips them, so any peer could set them by hand. Opt in explicitly rather
+  // than trusting a header because of its name.
+  if (process.env.MIRROR_BEHIND_TS_SERVE !== '1') return null;
   const login = decodeHeader(headers['tailscale-user-login']);
   if (!login) return null;
   const name = decodeHeader(headers['tailscale-user-name']) || login.split('@')[0];

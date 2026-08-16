@@ -205,7 +205,13 @@ function sameOrigin(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || cfg.bind}`);
+  // A malformed Host header makes new URL() throw. In an async handler that is
+  // an unhandled rejection, and Node 20 exits on those — one bad request would
+  // take the mirror down. Everything below is wrapped for the same reason.
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || cfg.bind}`); }
+  catch { res.writeHead(400).end('bad request'); return; }
+  try {
   const p = route(url.pathname);
   if (p === null) { res.writeHead(404).end('not found'); return; }
 
@@ -221,6 +227,14 @@ const server = http.createServer(async (req, res) => {
   // ---- POST /send : the write leg. Browser -> channel server -> live session.
   if (req.method === 'POST' && p === '/send') {
     if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+    // Require a non-simple content type. A form/img/script cross-origin POST
+    // cannot set this, so it forces a preflight that sameOrigin() then rejects.
+    // SECURITY.md claimed this was enforced; until now only the client sent it.
+    if (!/^application\/json/i.test(req.headers['content-type'] || '')) {
+      res.writeHead(415, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'content-type must be application/json' }));
+      return;
+    }
 
     // Identity is resolved in exactly one place (src/identity.mjs). If it
     // cannot be established we refuse — no anonymous speech into a mind.
@@ -359,6 +373,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404).end('not found');
+  } catch (err) {
+    log(`request error: ${err.message}`);
+    try { res.writeHead(500).end('server error'); } catch { /* already sent */ }
+  }
 });
 
 // The channel server this sits beside has no 'error' handler on listen, so an

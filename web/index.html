@@ -138,6 +138,10 @@
 </div>
 
 <script>
+/** Escape for HTML interpolation. Everything untrusted goes through this. */
+const esc = t => String(t ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 const feed = document.getElementById('feed');
 const dot = document.getElementById('dot');
 const stat = document.getElementById('stat');
@@ -189,9 +193,9 @@ function header(ev, extra){
   const kind = ev.from?.kind || 'system';
   const w = document.createElement('div');
   w.className = 'who';
-  w.innerHTML = `<span class="name">${ev.from?.display || '?'}</span>
-                 <span class="time">${clock(ev.ts)}</span>
-                 ${extra ? `<span class="tag">${extra}</span>` : ''}`;
+  w.innerHTML = `<span class="name">${esc(ev.from?.display || '?')}</span>
+                 <span class="time">${esc(clock(ev.ts))}</span>
+                 ${extra ? `<span class="tag">${esc(extra)}</span>` : ''}`;
   return { wrap: kind, node: w };
 }
 
@@ -219,7 +223,7 @@ function render(ev){
       if (ev.body?.blob_ref){
         const a = document.createElement('div');
         a.className = 'note';
-        a.innerHTML = `full output: <a href="${BASE}/blob/${ev.body.blob_ref}" target="_blank">${ev.body.blob_ref}</a>`;
+        a.innerHTML = `full output: <a href="${esc(BASE)}/blob/${encodeURIComponent(ev.body.blob_ref)}" target="_blank">${esc(ev.body.blob_ref)}</a>`;
         card.appendChild(a);
       }
     } else {
@@ -334,13 +338,7 @@ enterBtn.addEventListener('click', () => {
 
 // The header is fixed and wraps on narrow screens, so its height is not a
 // constant. Measure it and keep the feed clear.
-function syncHeaderHeight(){
-  const h = document.querySelector('header').offsetHeight;
-  document.documentElement.style.setProperty('--headh', h + 'px');
-}
-syncHeaderHeight();
-window.addEventListener('resize', syncHeaderHeight);
-new ResizeObserver(syncHeaderHeight).observe(document.querySelector('header')); input.focus();
+applyEnterMode(); input.focus();
 });
 applyEnterMode();
 
@@ -422,15 +420,15 @@ setInterval(async () => {
     const box = document.getElementById('viewers');
     const mine = `${window.innerWidth}x${window.innerHeight}`;
     box.innerHTML = vs.length < 2 ? '' :
-      `<span class="viewer count">${vs.length} viewers</span>` + vs.map(c => {
+      `<span class="viewer count">${esc(vs.length)} viewers</span>` + vs.map(c => {
         const label = c.mobile ? 'phone' : (c.platform || 'desktop').toLowerCase();
         const isMe = c.viewport === mine;
-        return `<span class="viewer${isMe ? ' me' : ''}">${label}${isMe ? ' (this one)' : ''}</span>`;
+        return `<span class="viewer${isMe ? ' me' : ''}">${esc(label)}${isMe ? ' (this one)' : ''}</span>`;
       }).join('');
     // Context meter, straight out of the transcript's own usage records.
     if (h.session){
       const pct = h.session.context_pct;
-      document.getElementById('ctxmodel').textContent = (h.session.model || '').replace(/^claude-/, '');
+      document.getElementById('ctxmodel').textContent = String(h.session.model || '').replace(/^claude-/, '');
       document.getElementById('ctxpct').textContent =
         `${(h.session.context_tokens/1000).toFixed(0)}k · ${pct}%`;
       const fill = document.getElementById('ctxfill');

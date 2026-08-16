@@ -67,8 +67,16 @@ self-description.
 ## The write path
 
 `POST /send` injects into a **live session**. It checks `Sec-Fetch-Site`/`Origin`
-and requires a non-simple content type to force a preflight. Enable it only
-deliberately (`--with-input`); the default is read-only.
+and requires `Content-Type: application/json`, which a cross-origin form, image
+or script tag cannot set — so such a request must preflight, and the origin check
+then rejects it. Enable it only deliberately (`--with-input`); the default is
+read-only.
+
+Note the residual gap: when neither `Sec-Fetch-Site` nor `Origin` is present the
+origin check passes, because non-browser clients (curl, tests) send neither. The
+content-type requirement is what makes that safe against a browser; it is not a
+defence against a local process, which can send anything. Loopback is not a
+boundary.
 
 Anyone who can POST there can say anything to that session, as the stub
 identity, and the session will act on it.

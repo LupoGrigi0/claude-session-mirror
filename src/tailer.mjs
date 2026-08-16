@@ -88,7 +88,10 @@ export class TranscriptTailer {
         label = meta.description || meta.agentType || label;
       } catch { /* meta may not exist yet; the transcript can appear first */ }
 
-      this._track(file, { ...this.ctx, agentId, agentLabel: label }, fromStart);
+      // Always read a newly-discovered subagent from byte 0: it was created
+      // since the last poll, so everything it has written is new to us. Starting
+      // at EOF would silently drop its opening turns.
+      this._track(file, { ...this.ctx, agentId, agentLabel: label }, true);
       this.log(`subagent joined: ${label} (${agentId.slice(0, 8)})`);
       this.onEvents([{
         ts: new Date().toISOString(),
@@ -121,14 +124,19 @@ export class TranscriptTailer {
     }
     if (size === state.offset) return;
 
-    const fd = fs.openSync(file, 'r');
+    // try/finally or a throwing read leaks one fd per 250ms poll until EMFILE.
+    // Also honour the byte count: a truncation between statSync and readSync
+    // yields a short read, and advancing to `size` regardless would parse NUL
+    // padding as data and skip real lines forever.
     const len = size - state.offset;
     const buf = Buffer.alloc(len);
-    fs.readSync(fd, buf, 0, len, state.offset);
-    fs.closeSync(fd);
-    state.offset = size;
+    let got = 0;
+    const fd = fs.openSync(file, 'r');
+    try { got = fs.readSync(fd, buf, 0, len, state.offset); }
+    finally { fs.closeSync(fd); }
+    state.offset += got;
 
-    const chunk = state.partial + buf.toString('utf8');
+    const chunk = state.partial + buf.subarray(0, got).toString('utf8');
     const lines = chunk.split('\n');
     // Last element is either '' (clean boundary) or a torn line — hold it back.
     state.partial = lines.pop() ?? '';

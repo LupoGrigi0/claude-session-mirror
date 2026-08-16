@@ -86,7 +86,10 @@ export function unwrapChannelEnvelope(raw) {
 
   // Layer 3 — the async reply guidance. Wrong for a browser conversation (the
   // human is watching this very stream) and pure noise in their own bubble.
-  text = text.replace(/\n*\[To answer [\s\S]*$/, '');
+  // Anchored to the start of a line AND required to mention the reply tool.
+  // The old unanchored form truncated any message that merely contained the
+  // phrase "[To answer".
+  text = text.replace(/\n*^\[To answer [^\]]*reply[\s\S]*$/m, '');
 
   return { text: text.trim(), from };
 }
