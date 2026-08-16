@@ -94,6 +94,33 @@ export function unwrapChannelEnvelope(raw) {
   return { text: text.trim(), from };
 }
 
+/**
+ * Claude Code injects agent completions and system reminders as `user`-role
+ * entries. They are NOT the human speaking — rendering them in Lupo's bubble
+ * makes him appear to narrate XML about his own subagents. Same class of error
+ * as attributing tool results to him: a structural field mistaken for a speaker.
+ *
+ * @returns {{kind:'agent'|'system', title:string, text:string}|null}
+ */
+export function detectSystemInjection(raw) {
+  const t = String(raw ?? '');
+  if (/^\s*<task-notification>/.test(t)) {
+    const summary = /<summary>([\s\S]*?)<\/summary>/.exec(t)?.[1]?.trim();
+    const result  = /<result>([\s\S]*?)<\/result>/.exec(t)?.[1]?.trim();
+    const status  = /<status>([\s\S]*?)<\/status>/.exec(t)?.[1]?.trim();
+    return {
+      kind: 'agent',
+      title: summary || `agent ${status || 'finished'}`,
+      text: result || t,
+    };
+  }
+  if (/^\s*<system-reminder>/.test(t)) {
+    return { kind: 'system', title: 'system reminder',
+             text: t.replace(/<\/?system-reminder>/g, '').trim() };
+  }
+  return null;
+}
+
 export function normalizeEntry(entry, ctx = {}) {
   const type = entry?.type;
   if (!CONVERSATIONAL.has(type)) return [];
@@ -144,6 +171,13 @@ export function normalizeEntry(entry, ctx = {}) {
       if (!block.text?.trim()) return;
       if (type === 'user') {
         const un = unwrapChannelEnvelope(block.text);
+        const sys = detectSystemInjection(un.text || block.text);
+        if (sys) {
+          events.push({ ...base, index, type: 'agent_result',
+            from: { id: sys.kind, kind: 'system', display: sys.title },
+            body: { text: sys.text, title: sys.title } });
+          return;
+        }
         const speaker = un.from
           ? { id: un.from, kind: 'human', display: un.from.split('@')[0], channel: un.from.split('@')[1] || 'channel' }
           : from;

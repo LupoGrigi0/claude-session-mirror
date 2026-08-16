@@ -54,6 +54,11 @@
   .instance .name{color:var(--cairn)} .instance .bubble{border-left-color:var(--cairn)}
   .subagent .name{color:var(--sub)} .subagent .bubble{border-left-color:var(--sub)}
   .system .name{color:var(--tool)}
+  .agentres{border:1px solid var(--line);border-left:3px solid var(--sub);
+            border-radius:8px;background:var(--panel);margin:12px 0}
+  .agentres>.cap{font:11px var(--mono);color:var(--sub);padding:7px 12px;
+                 border-bottom:1px solid var(--line);letter-spacing:.3px}
+  .agentres>.bd{padding:10px 14px;overflow-wrap:anywhere}
 
   /* Conversational asymmetry: mine hang left, Lupo's pull in from the left and
      sit right. Deliberately gentle — a lean, not iMessage. */
@@ -90,10 +95,16 @@
   a{color:var(--cairn)}
   .gist{font:11px var(--mono);color:var(--dim);overflow:hidden;text-overflow:ellipsis;
         white-space:nowrap;min-width:0;flex:1}
+  table.md{border-collapse:collapse;margin:10px 0;font-size:.93em;display:block;
+           overflow-x:auto;max-width:100%}
+  table.md th,table.md td{border:1px solid var(--line);padding:5px 9px;text-align:left;
+                          vertical-align:top}
+  table.md th{background:var(--raised);color:var(--fg);font-weight:600;white-space:nowrap}
+  table.md tr:nth-child(even) td{background:rgba(255,255,255,.02)}
   .h{font-weight:700;margin:10px 0 4px;color:#dfe6ff;line-height:1.3}
   .h1{font-size:1.25em} .h2{font-size:1.12em} .h3{font-size:1em} .h4{font-size:.95em}
   .li{padding-left:16px;position:relative;margin:2px 0}
-  .li::before{content:"\u2022";position:absolute;left:4px;color:var(--faint)}
+  .li::before{content:"\2022";position:absolute;left:4px;color:var(--faint)}
   /* long unbroken tokens in inline code were forcing the page sideways,
      which clipped the sticky header */
   code{overflow-wrap:anywhere;word-break:break-word}
@@ -160,6 +171,17 @@ function md(s){
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
     .replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,!?)]|$)/g, '$1<em>$2</em>')
     .replace(/(^|\s)\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/(?:^\|.*\|[ \t]*\n)+/gm, tbl => {
+      const rows = tbl.trim().split('\n')
+        .map(r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim()));
+      if (rows.length < 2 || !/^[:\- ]+$/.test(rows[1].join(''))) return tbl;
+      const head = rows[0], body = rows.slice(2);
+      return '<table class="md"><thead><tr>'
+        + head.map(c => `<th>${c}</th>`).join('')
+        + '</tr></thead><tbody>'
+        + body.map(r => '<tr>' + r.map(c => `<td>${c}</td>`).join('') + '</tr>').join('')
+        + '</tbody></table>';
+    })
     .replace(/^(#{1,4})\s+(.+)$/gm, (_, h, t) => `<div class="h h${h.length}">${t}</div>`)
     .replace(/^[-*]\s+(.+)$/gm, '<div class="li">$1</div>')
     .replace(/\n/g, '<br>')
@@ -233,6 +255,19 @@ function render(ev){
       d.appendChild(pre); add(d);
     }
     return;
+  }
+
+  if (ev.type === 'agent_result'){
+    // A subagent finishing, or a system reminder. Injected as a user-role
+    // transcript entry, but emphatically not the human talking.
+    const d = document.createElement('div');
+    d.className = 'agentres ev';
+    d.innerHTML = `<div class="cap">${esc(ev.body?.title || 'agent result')}`
+                + ` <span style="color:var(--faint)">${esc(clock(ev.ts))}</span></div>`;
+    const bd = document.createElement('div');
+    bd.className = 'bd';
+    bd.innerHTML = md(ev.body?.text || '');
+    d.appendChild(bd); add(d); return;
   }
 
   if (ev.type === 'tool_use'){
