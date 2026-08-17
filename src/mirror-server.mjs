@@ -112,6 +112,7 @@ const tailer = new TranscriptTailer({
     }
   },
   log,
+  stateFile: path.join(cfg.dataDir, `${cfg.instance}.offsets.json`),
 });
 // NOTE: start() is deliberately NOT called here. It emits subagent_start events
 // synchronously for every transcript already on disk, which reaches broadcast()

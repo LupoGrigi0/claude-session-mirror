@@ -30,8 +30,14 @@ export class TranscriptTailer {
    * @param {(events: object[]) => void} opts.onEvents
    * @param {(msg: string) => void} [opts.log]
    */
-  constructor({ transcriptPath, ctx, onEvents, onUsage = () => {}, log = () => {} }) {
+  constructor({ transcriptPath, ctx, onEvents, onUsage = () => {}, log = () => {}, stateFile = '' }) {
     this.onUsage = onUsage;
+    // Byte offsets persisted across restarts. Without this, every restart made
+    // each subagent file look newly-discovered and re-ingested it from byte 0 —
+    // twelve transcripts times twenty-five restarts, all appended again.
+    this.stateFile = stateFile;
+    this.saved = {};
+    if (stateFile) { try { this.saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* first run */ } }
     this.transcriptPath = transcriptPath;
     this.ctx = ctx;
     this.onEvents = onEvents;
@@ -57,17 +63,34 @@ export class TranscriptTailer {
   }
 
   stop() {
+    this._saveOffsets();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
   _track(file, ctx, fromStart) {
     if (this.files.has(file)) return;
-    let offset = 0;
-    if (!fromStart) {
-      try { offset = fs.statSync(file).size; } catch { offset = 0; }
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch { /* gone */ }
+
+    let offset;
+    if (Object.prototype.hasOwnProperty.call(this.saved, file)) {
+      // Seen before: resume exactly where we stopped. If the file is now
+      // SMALLER it was replaced, so start over.
+      offset = this.saved[file] <= size ? this.saved[file] : 0;
+    } else if (fromStart) {
+      offset = 0;                 // genuinely new mid-session: read all of it
+    } else {
+      offset = size;              // first run, no history: don't replay the past
     }
     this.files.set(file, { offset, partial: '', ctx });
+  }
+
+  _saveOffsets() {
+    if (!this.stateFile) return;
+    const out = {};
+    for (const [f, st] of this.files) out[f] = st.offset;
+    try { fs.writeFileSync(this.stateFile, JSON.stringify(out)); } catch { /* best effort */ }
   }
 
   /** New subagents appear mid-session; discover them as they show up. */
@@ -80,6 +103,7 @@ export class TranscriptTailer {
       const file = path.join(this.subagentDir, name);
       if (this.files.has(file)) continue;
 
+      const announce = !Object.prototype.hasOwnProperty.call(this.saved, file);
       const agentId = name.replace(/^agent-/, '').replace(/\.jsonl$/, '');
       let label = 'subagent';
       try {
@@ -91,9 +115,11 @@ export class TranscriptTailer {
       // Always read a newly-discovered subagent from byte 0: it was created
       // since the last poll, so everything it has written is new to us. Starting
       // at EOF would silently drop its opening turns.
-      this._track(file, { ...this.ctx, agentId, agentLabel: label }, true);
+      this._track(file, { ...this.ctx, agentId, agentLabel: label }, fromStart);
       this.log(`subagent joined: ${label} (${agentId.slice(0, 8)})`);
-      this.onEvents([{
+      // Only announce agents we have never seen. Re-announcing every known
+      // agent on every restart added twelve spurious events per boot.
+      if (announce) this.onEvents([{
         ts: new Date().toISOString(),
         room_id: this.ctx.roomId,
         type: 'subagent_start',
@@ -105,7 +131,8 @@ export class TranscriptTailer {
   }
 
   _tick() {
-    this._scanSubagents(false);
+    // Discovered while running => genuinely new => read from byte 0.
+    this._scanSubagents(true);
     for (const [file, state] of this.files) {
       try { this._drain(file, state); }
       catch (err) { this.log(`tail error ${path.basename(file)}: ${err.message}`); }
@@ -135,6 +162,7 @@ export class TranscriptTailer {
     try { got = fs.readSync(fd, buf, 0, len, state.offset); }
     finally { fs.closeSync(fd); }
     state.offset += got;
+    this._saveOffsets();
 
     const chunk = state.partial + buf.subarray(0, got).toString('utf8');
     const lines = chunk.split('\n');
