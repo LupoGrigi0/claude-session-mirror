@@ -45,6 +45,7 @@
   .who{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
   .name{font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
   .time{font:11px var(--mono);color:var(--faint)}
+  .time.older{color:var(--tool)}
   .tag{font:10px/1 var(--mono);padding:2px 6px;border-radius:3px;
        background:var(--raised);color:var(--dim);border:1px solid var(--line)}
 
@@ -239,7 +240,24 @@ function gist(tool, input){
   return v.length > 96 ? v.slice(0,96) + '…' : v;
 }
 
-const clock = ts => { try { return new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ''; } };
+// Show the DATE too when an event isn't from today. Scrolling back through
+// several days of similar-looking times is genuinely disorienting without it.
+const clock = ts => {
+  try {
+    const d = new Date(ts), now = new Date();
+    const t = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const sameDay = d.getFullYear() === now.getFullYear()
+                 && d.getMonth() === now.getMonth()
+                 && d.getDate() === now.getDate();
+    if (sameDay) return t;
+    const day = d.toLocaleDateString([], {
+      month:'short', day:'numeric',
+      ...(d.getFullYear() === now.getFullYear() ? {} : {year:'numeric'}),
+      weekday: 'short',
+    });
+    return `${day} ${t}`;
+  } catch { return ''; }
+};
 const atBottom = () => window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
 // The feed is capped: an append-only DOM pins every node alive, and this tab
 // stays open for days. Trim from the top on live appends; "load earlier"
@@ -305,7 +323,7 @@ function header(ev, extra){
   const w = document.createElement('div');
   w.className = 'who';
   w.innerHTML = `<span class="name">${esc(ev.from?.display || '?')}</span>
-                 <span class="time">${esc(clock(ev.ts))}</span>
+                 <span class="time${/\d{1,2}:/.test(esc(clock(ev.ts))) && esc(clock(ev.ts)).length > 9 ? ' older' : ''}">${esc(clock(ev.ts))}</span>
                  ${extra ? `<span class="tag">${esc(extra)}</span>` : ''}`;
   return { wrap: kind, node: w };
 }
