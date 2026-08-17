@@ -227,10 +227,14 @@ function add(el){
   if (__target){ __target.appendChild(el); return; }
   const stick = atBottom();
   feed.appendChild(el);
-  while (feed.children.length > MAX_NODES + 2) {
-    const first = feed.children[2];      // keep #earlier and #empty slots
-    if (!first) break;
-    first.remove();
+  // Trim the OLDEST event, not children[2]. #empty is removed on the first
+  // event, so index 2 was the *second* event — which pinned the very first one
+  // at the top forever while everything after it was deleted. The result looked
+  // like a gap in history: one ancient message, then a jump to the present.
+  while (feed.children.length > MAX_NODES + 1) {
+    const oldest = [...feed.children].find(c => c.id !== 'earlier' && c.id !== 'empty');
+    if (!oldest) break;
+    oldest.remove();
   }
   if (stick) window.scrollTo(0, document.body.scrollHeight);
 }
@@ -402,7 +406,13 @@ es.addEventListener('mirror', e => {
   } catch {}
 });
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
-es.addEventListener('resync', () => { feed.innerHTML = ''; toolCards.clear(); });
+es.addEventListener('resync', () => {
+  // innerHTML='' also destroyed the #earlier button, so load-earlier stopped
+  // working after any epoch change (i.e. after every server restart).
+  [...feed.children].forEach(c => { if (c.id !== 'earlier') c.remove(); });
+  toolCards.clear();
+  earliestSeq = null;
+});
 es.onopen = () => { dot.className = 'dot live'; };
 es.onerror = () => { dot.className = 'dot down'; stat.textContent = 'reconnecting…'; };
 
