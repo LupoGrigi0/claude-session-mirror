@@ -110,6 +110,27 @@
   code{overflow-wrap:anywhere;word-break:break-word}
   html,body{max-width:100%;overflow-x:hidden}
   details.tool>summary>strong{flex:none}
+  /* permission cards — pinned under the header, never buried in the feed */
+  #perms{position:fixed;left:0;right:0;z-index:6;display:none;
+         top:var(--headh,52px);background:#241c22;border-bottom:1px solid var(--err)}
+  #perms.show{display:block}
+  #perms .inner{max-width:920px;margin:0 auto;padding:10px 16px}
+  .perm{display:flex;gap:12px;align-items:flex-start;padding:8px 0;
+        border-top:1px solid rgba(247,118,142,.25)}
+  .perm:first-child{border-top:0}
+  .perm .what{flex:1;min-width:0}
+  .perm .tool{font:11px var(--mono);color:var(--err);font-weight:700;letter-spacing:.4px}
+  .perm .cmd{font:12px/1.45 var(--mono);color:var(--fg);background:#16161e;
+             border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin-top:4px;
+             white-space:pre-wrap;overflow-wrap:anywhere;max-height:130px;overflow:auto}
+  .perm .acts{display:flex;gap:8px;flex:none;padding-top:14px}
+  .perm button{border:0;border-radius:7px;padding:7px 14px;font-weight:700;cursor:pointer}
+  .perm .allow{background:var(--human);color:#12131c}
+  .perm .deny{background:none;color:var(--err);border:1px solid var(--err)}
+  .perm button:disabled{opacity:.45;cursor:default}
+  .perm .rid{font:10px var(--mono);color:var(--faint);margin-top:3px}
+  @media (max-width:560px){ .perm{flex-wrap:wrap} .perm .acts{padding-top:6px;width:100%} }
+
   /* composer */
   #composer{position:fixed;left:0;right:0;bottom:0;background:var(--panel);
             border-top:1px solid var(--line);padding:10px 16px;z-index:6}
@@ -147,6 +168,7 @@
   <div id="viewers"></div>
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
+<div id="perms"><div class="inner"></div></div>
 <main id="feed"><button id="earlier">load earlier</button><div class="empty" id="empty">waiting for the stream…</div></main>
 <div id="composer">
   <div class="row">
@@ -394,6 +416,7 @@ const es = new EventSource(BASE + '/events?' + clientParams);
 es.addEventListener('mirror', e => {
   try {
     const ev = JSON.parse(e.data);
+    if (ev.type === 'permissions'){ renderPermissions(ev.body?.pending); return; }
     if (ev.type === 'window_start'){
       // The server sent a bounded tail, not the whole log. Say so honestly
       // rather than letting a partial view look complete.
@@ -422,7 +445,10 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const sendStat = document.getElementById('sendstat');
 const DRAFT = 'mirror-draft';
-const pending = [];   // {text, at} awaiting confirmation FROM THE STREAM
+const outbox = [];    // {text, at} sent, awaiting confirmation FROM THE STREAM
+                      // (deliberately NOT called `pending` — that word means
+                      //  permission requests elsewhere, and confusing the two
+                      //  would be a bad day)
 let inFlight = false;
 
 input.value = localStorage.getItem(DRAFT) || '';
@@ -470,7 +496,10 @@ applyEnterMode();
 // constant. Measure it and keep the feed clear.
 function syncHeaderHeight(){
   const h = document.querySelector('header').offsetHeight;
-  document.documentElement.style.setProperty('--headh', h + 'px');
+  const perms = document.getElementById('perms');
+  const ph = perms && perms.classList.contains('show') ? perms.offsetHeight : 0;
+  document.documentElement.style.setProperty('--headh', (h + ph) + 'px');
+  perms && (perms.style.top = h + 'px');
 }
 syncHeaderHeight();
 window.addEventListener('resize', syncHeaderHeight);
@@ -502,7 +531,7 @@ async function send(){
     });
     const out = await r.json().catch(()=>({}));
     if (r.ok && out.ok){
-      pending.push({ text, at: Date.now() });
+      outbox.push({ text, at: Date.now() });
       // NOTE: "delivered" is DERIVED by watching the message reappear in the
       // mirror stream. We never ask the instance to confirm anything (Law 9.1).
       sendStat.textContent = 'queued — waiting for it to land in the session';
@@ -522,14 +551,75 @@ async function send(){
 function confirmFromStream(ev){
   if (ev.type !== 'user_message') return;
   const body = (ev.body?.text || '');
-  for (let i = pending.length - 1; i >= 0; i--){
-    if (body.includes(pending[i].text.slice(0, 60))){
-      const ms = Date.now() - pending[i].at;
-      pending.splice(i,1);
+  for (let i = outbox.length - 1; i >= 0; i--){
+    if (body.includes(outbox[i].text.slice(0, 60))){
+      const ms = Date.now() - outbox[i].at;
+      outbox.splice(i,1);
       sendStat.textContent = `delivered to the session (${ms} ms)`;
-      setTimeout(()=>{ if(!pending.length) sendStat.textContent=''; }, 4000);
+      setTimeout(()=>{ if(!outbox.length) sendStat.textContent=''; }, 4000);
     }
   }
+}
+
+// --- permission cards --------------------------------------------------------
+// Requirements from Bastion, who nearly caused a real incident testing this:
+//   1. NEVER approve by position — verdicts bind to request_id. Requests queue
+//      concurrently and his approval hit a different action than he intended.
+//   2. Show the literal command. An Approve button without it is a button that
+//      says "trust me", which for a root session is the whole security model.
+//   3. A request can resolve between render and tap — report that honestly.
+//   4. The source list is in-memory and dies with the session; cards must not
+//      outlive it, so the poll is the only truth and it always wins.
+const permsBox = document.getElementById('perms');
+const permsInner = permsBox.querySelector('.inner');
+
+function renderPermissions(list){
+  const items = Array.isArray(list) ? list : [];
+  permsBox.classList.toggle('show', items.length > 0);
+  document.documentElement.style.setProperty('--permh',
+    items.length ? permsBox.offsetHeight + 'px' : '0px');
+  if (!items.length){ permsInner.innerHTML = ''; syncHeaderHeight(); return; }
+
+  permsInner.innerHTML = items.map(pmt => `
+    <div class="perm" data-rid="${esc(pmt.request_id)}">
+      <div class="what">
+        <div class="tool">${esc(pmt.tool_name || 'tool')} wants permission</div>
+        <div class="cmd">${esc(pmt.input_preview || pmt.description || '(no preview available)')}</div>
+        <div class="rid">id ${esc(pmt.request_id)}${pmt.received_at ? ' · ' + esc(pmt.received_at) : ''}</div>
+      </div>
+      <div class="acts">
+        <button class="allow">Allow</button>
+        <button class="deny">Deny</button>
+      </div>
+    </div>`).join('');
+
+  permsInner.querySelectorAll('.perm').forEach(card => {
+    const rid = card.dataset.rid;      // the ID, never the index
+    card.querySelector('.allow').addEventListener('click', () => verdict(card, rid, 'allow'));
+    card.querySelector('.deny').addEventListener('click', () => verdict(card, rid, 'deny'));
+  });
+  syncHeaderHeight();
+}
+
+async function verdict(card, request_id, behavior){
+  card.querySelectorAll('button').forEach(b => b.disabled = true);
+  const rid = card.querySelector('.rid');
+  const was = rid.textContent;
+  rid.textContent = behavior === 'allow' ? 'allowing…' : 'denying…';
+  try{
+    const r = await fetch(BASE + '/permission', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ request_id, behavior }) });
+    const d = await r.json().catch(()=>({}));
+    if (d.ok){ rid.textContent = behavior === 'allow' ? 'allowed' : 'denied'; }
+    else if (d.stale){ rid.textContent = 'already resolved elsewhere'; }
+    else { rid.textContent = `failed: ${d.error || r.status}`;
+           card.querySelectorAll('button').forEach(b => b.disabled = false); }
+  } catch(err){
+    rid.textContent = `failed: ${err.message}`;
+    card.querySelectorAll('button').forEach(b => b.disabled = false);
+  }
+  setTimeout(()=>{ if (rid.textContent !== was) rid.textContent = was; }, 6000);
 }
 
 // --- stop -------------------------------------------------------------------
@@ -611,6 +701,7 @@ setInterval(async () => {
     // Offer Stop only when the session looks busy — a turn is in flight if
     // something happened in the last ~45s. Always available if input is on and
     // we simply can't tell.
+    renderPermissions(h.pending_permissions);
     const busy = h.last_event_age_s !== null && h.last_event_age_s < 45;
     stopBtn.classList.toggle('show', Boolean(h.write_path?.interrupt) && busy);
     const age = h.last_event_age_s;

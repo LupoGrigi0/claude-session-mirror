@@ -49,6 +49,11 @@ const cfg = {
   // tmux session to interrupt. Defaults to the instance id, which is the
   // chassis convention. Empty string disables the stop button entirely.
   tmuxSession:  process.env.MIRROR_TMUX_SESSION ?? (process.env.MIRROR_INSTANCE || ''),
+  // H-04 (Bastion): the channel server will gate verdicts by caller uid. A
+  // mirror runs as its own instance's uid, which for a root session is not a
+  // trusted one — so a token proves "a human authorized this" alongside uid
+  // proving "which local process". Pass-through built now so the patch slots in.
+  verdictToken: process.env.MIRROR_VERDICT_TOKEN || '',
 };
 
 /** Strip the base path; returns null when the request isn't ours. */
@@ -111,6 +116,40 @@ const tailer = new TranscriptTailer({
 // NOTE: start() is deliberately NOT called here. It emits subagent_start events
 // synchronously for every transcript already on disk, which reaches broadcast()
 // before `clients` exists. Started at the bottom, once everything is wired.
+
+
+// --- pending permissions -----------------------------------------------------
+// Polled from the instance's own channel server. Held in memory ONLY, and
+// cleared whenever the source says they are gone: `pendingPermissions` on the
+// channel side is in-memory too and dies with the session, so a card must never
+// outlive the session that created it (Bastion).
+let pending = [];
+let pendingAt = 0;
+
+async function pollPermissions() {
+  if (!cfg.channelUrl) return;
+  try {
+    const r = await fetch(cfg.channelUrl + '/pending-permissions',
+                          { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return;
+    const d = await r.json();
+    const next = Array.isArray(d.pending) ? d.pending : [];
+    const before = pending.map(x => x.request_id).join(',');
+    const after  = next.map(x => x.request_id).join(',');
+    pending = next;
+    pendingAt = Date.now();
+    if (before !== after) {
+      // Surface as a normal mirror event so every attached browser updates at
+      // once, rather than each polling independently.
+      eventLog.append({
+        ts: new Date().toISOString(), room_id: cfg.room, type: 'permissions',
+        from: { id: 'system', kind: 'system', display: 'permissions' },
+        body: { pending: next },
+      });
+    }
+  } catch { /* channel down or restarting — leave the last known state */ }
+}
+setInterval(pollPermissions, 2000).unref();
 
 // --- SSE ---------------------------------------------------------------------
 /** @type {Set<{res: import('node:http').ServerResponse, queued: number}>} */
@@ -322,6 +361,62 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+
+  // ---- POST /permission : approve or deny ONE request, BY ID.
+  //
+  // Never by position. Bastion approved pending[0] during testing and hit a
+  // different action than he intended — the mind's own reply call had queued
+  // ahead of the Bash command he meant to allow. Requests genuinely queue
+  // concurrently; this is not an edge case. The id is the only safe handle.
+  if (req.method === 'POST' && p === '/permission') {
+    if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+    if (!/^application\/json/i.test(req.headers['content-type'] || '')) {
+      res.writeHead(415).end('content-type must be application/json'); return;
+    }
+    const who = resolveIdentity(req);
+    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch { /* below */ }
+    const id = typeof body.request_id === 'string' ? body.request_id.trim() : '';
+    const behavior = body.behavior === 'allow' ? 'allow'
+                   : body.behavior === 'deny'  ? 'deny' : null;
+    if (!id || !behavior) {
+      res.writeHead(400, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'request_id and behavior ("allow"|"deny") required' }));
+      return;
+    }
+
+    try {
+      const r = await fetch(cfg.channelUrl + '/permission-verdict', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(cfg.verdictToken ? { 'X-Verdict-Token': cfg.verdictToken } : {}),
+        },
+        body: JSON.stringify({ request_id: id, behavior }),
+      });
+      const out = await r.json().catch(() => ({}));
+      log(`permission ${behavior} ${id} by ${senderAddress(who)} -> ${r.status}`);
+      pollPermissions();                       // refresh every viewer immediately
+      // A request can resolve between render and tap (timeout, terminal answer,
+      // session restart). Say so honestly instead of reporting success.
+      if (r.status === 404) {
+        res.writeHead(409, {'Content-Type':'application/json'})
+           .end(JSON.stringify({ ok:false, stale:true,
+                                 error:'already resolved or no longer pending' }));
+        return;
+      }
+      res.writeHead(r.ok ? 200 : 502, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok: r.ok, ...out }));
+    } catch (err) {
+      log(`permission FAILED ${id}: ${err.message}`);
+      res.writeHead(502, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error: err.message }));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && p === '/history') {
     const before = Number(url.searchParams.get('before') || 0);
     const limit = Math.min(500, Number(url.searchParams.get('limit') || 150));
@@ -350,6 +445,8 @@ const server = http.createServer(async (req, res) => {
       // liveness from last_event_age_s.
       last_event_age_s: lastAge,
       counters: { ...stats },
+      pending_permissions: pending,
+      pending_age_s: pendingAt ? Math.round((Date.now() - pendingAt)/1000) : null,
       uptime_s: Math.round((Date.now() - stats.startedAt) / 1000),
       session: usage ? {
         model: usage.model,
