@@ -124,6 +124,37 @@ Verified against a running server rather than by reading the code: byte-exact
 round trip, five traversal shapes all refused, oversize refused, SVG served as
 `application/octet-stream; attachment`.
 
+## A review question worth asking every time
+
+**Does this protection actually *apply* in the unusual deployment?**
+
+Not "is it correct" — it usually is. Two defects found within an hour of each
+other had the same shape: a protection that genuinely existed, and genuinely did
+not apply, in the configuration nobody had run.
+
+- `/health` returned the full pending-permission list, unauthenticated. Correct
+  on its own. But a sibling patch gates that same data on the channel server
+  behind kernel-verified peer uid, because an unauthenticated read of pending
+  request ids plus a verdict POST is a privilege-escalation chain against a root
+  session. **The mirror re-opened on one port the hole the patch closes on
+  another.** Each component was defensible alone; together they were a bypass.
+- The permissions-only marker made the mode sticky across restarts, so a
+  misconfigured restart could not silently publish a root session. Correct — and
+  the launcher derived its path from `$HOME`. For every instance to date `$HOME`
+  *is* the instance directory, so the difference had never been exercised. On the
+  one deployment that mattered — root, with a home detached from its instance
+  directory — **the marker would have been written beside a home nobody uses,
+  protecting nothing.**
+
+Neither was visible from inside the component that owned it. Both surfaced only
+because someone holding the other half of the picture looked at it.
+
+So: when a change touches a privilege boundary, get it read by whoever owns the
+*other* side of that boundary, and specifically ask what happens in the odd
+deployment — the detached home, the different uid, the second port holding the
+same data. A protection that is correct everywhere except where it matters is
+worse than a missing one, because it reads as covered.
+
 ## Reporting
 
 Open an issue. If it is sensitive, say so and leave out the details until we can
