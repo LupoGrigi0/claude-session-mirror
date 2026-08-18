@@ -165,9 +165,30 @@
         padding:0 14px;height:42px;font-weight:700;cursor:pointer;flex:none;display:none}
   #stop.show{display:block}
   #stop:active{background:var(--err);color:#12131c}
-  #entertoggle{font:10px/1 var(--mono);color:var(--faint);background:none;border:1px solid var(--line);
-               border-radius:4px;padding:4px 7px;cursor:pointer;flex:none}
+  #entertoggle{font:11px/1 var(--mono);color:var(--faint);background:none;border:1px solid var(--line);
+               border-radius:6px;padding:7px 10px;cursor:pointer}
   #entertoggle.on{color:var(--cairn);border-color:var(--cairn)}
+
+  /* settings */
+  #gear{background:none;border:0;color:var(--faint);font-size:16px;cursor:pointer;
+        padding:2px 4px;line-height:1;flex:none}
+  #gear:hover,#gear[aria-expanded="true"]{color:var(--cairn)}
+  #settings{position:fixed;z-index:8;right:12px;top:var(--headh,52px);width:min(360px,calc(100vw - 24px));
+            max-height:min(70vh,560px);overflow:auto;background:var(--panel);
+            border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;
+            padding:14px 16px 18px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+  #settings[hidden]{display:none}
+  #settings .sect{padding:10px 0;border-top:1px solid var(--line)}
+  #settings .sect:first-child{border-top:0;padding-top:2px}
+  #settings .lbl{font:11px var(--mono);color:var(--cairn);letter-spacing:.5px;
+                 text-transform:uppercase;margin-bottom:7px}
+  #settings .hint{font:11.5px/1.6 var(--mono);color:var(--faint);margin-top:7px}
+  table.cheat{border-collapse:collapse;width:100%;font-size:12px}
+  table.cheat td{padding:3px 0;vertical-align:top}
+  table.cheat td:first-child{width:47%;padding-right:10px}
+  table.cheat code{font-size:11px}
+  #act{color:var(--cairn)}
+  #act:not(:empty)::after{content:"·";color:var(--faint);margin:0 6px}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
   main{padding-bottom:120px}
   #earlier{display:none;margin:8px auto 16px;padding:7px 14px;cursor:pointer;
@@ -184,8 +205,39 @@
   <h1 id="title">session mirror</h1>
   <div id="ctx"><span id="ctxmodel"></span><span id="ctxbar"><span id="ctxfill"></span></span><span id="ctxpct"></span></div>
   <div id="viewers"></div>
-  <div class="meta"><span id="stat">connecting…</span></div>
+  <div class="meta"><span id="act"></span><span id="stat">connecting…</span></div>
+  <button id="gear" title="Settings" aria-expanded="false">⚙</button>
 </header>
+<div id="settings" hidden>
+  <div class="sect">
+    <div class="lbl">Enter key</div>
+    <button id="entertoggle"></button>
+    <div class="hint" id="enterhint"></div>
+  </div>
+  <div class="sect">
+    <div class="lbl">Sending files</div>
+    <div class="hint">Paste a screenshot straight into the message box, drop a file
+      anywhere on this page, or use 📎. Limit <span id="uplimit">25 MB</span>.
+      Files sent <em>to</em> you appear in the feed as download links.</div>
+  </div>
+  <div class="sect">
+    <div class="lbl">Formatting you can use</div>
+    <table class="cheat">
+      <tr><td><code>**bold**</code></td><td><strong>bold</strong></td></tr>
+      <tr><td><code>_italic_</code></td><td><em>italic</em></td></tr>
+      <tr><td><code>`code`</code></td><td><code>code</code></td></tr>
+      <tr><td><code>```</code> … <code>```</code></td><td>code block</td></tr>
+      <tr><td><code># Heading</code></td><td>heading (1–4 <code>#</code>)</td></tr>
+      <tr><td><code>- item</code></td><td>bulleted list</td></tr>
+      <tr><td><code>| a | b |</code></td><td>table (needs a <code>|---|</code> row)</td></tr>
+    </table>
+    <div class="hint">Same renderer both directions — this is exactly what I can send you.</div>
+  </div>
+  <div class="sect">
+    <div class="lbl">This connection</div>
+    <div class="hint" id="setinfo">…</div>
+  </div>
+</div>
 <div id="perms"><div class="inner"></div></div>
 <div id="dropzone"><span>drop to send</span></div>
 <main id="feed"><button id="earlier">load earlier</button><div class="empty" id="empty">waiting for the stream…</div></main>
@@ -195,7 +247,6 @@
     <button id="attach" title="Attach a file — or just paste a screenshot, or drop one anywhere">📎</button>
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
     <button id="stop" title="Interrupt the current turn (sends ESC)">Stop</button>
-    <button id="entertoggle" title="Toggle whether Enter sends"></button>
     <button id="send" disabled>Send</button>
   </div>
   <div id="sendstat"></div>
@@ -504,7 +555,7 @@ es.addEventListener('mirror', e => {
       return;
     }
     if (earliestSeq === null) earliestSeq = ev.seq;
-    render(ev); confirmFromStream(ev);
+    render(ev); confirmFromStream(ev); noteActivity(ev);
   } catch {}
 });
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
@@ -553,9 +604,13 @@ const ENTER_KEY = 'mirror-enter-sends';
 let enterSends = localStorage.getItem(ENTER_KEY) === null ? !isTouch
                                                           : localStorage.getItem(ENTER_KEY) === '1';
 const enterBtn = document.getElementById('entertoggle');
+const enterHint = document.getElementById('enterhint');
 function applyEnterMode(){
-  enterBtn.textContent = enterSends ? '\u23CE sends' : '\u23CE newline';
+  enterBtn.textContent = enterSends ? '\u23CE Enter sends' : '\u23CE Enter makes a newline';
   enterBtn.classList.toggle('on', enterSends);
+  enterHint.textContent = enterSends
+    ? 'Shift+Enter for a newline. Default on a keyboard.'
+    : 'Tap Send to send. Default on a touch device.';
   input.placeholder = enterSends
     ? 'Message Cairn\u2026  (Enter to send, Shift+Enter for a newline)'
     : 'Message Cairn\u2026  (Enter for a newline, tap Send)';
@@ -564,11 +619,90 @@ enterBtn.addEventListener('click', () => {
   enterSends = !enterSends;
   localStorage.setItem(ENTER_KEY, enterSends ? '1' : '0');
   applyEnterMode();
-
-// The header is fixed and wraps on narrow screens, so its height is not a
-// constant. Measure it and keep the feed clear.
-applyEnterMode(); input.focus();
 });
+// Called at load, NOT only from the click handler. A stray comment had swallowed
+// this line into the handler above, so the button rendered blank and the
+// placeholder advertised the opposite of the saved setting until it was clicked.
+applyEnterMode();
+
+// --- settings panel ----------------------------------------------------------
+const gear = document.getElementById('gear');
+const settings = document.getElementById('settings');
+const setInfo = document.getElementById('setinfo');
+function openSettings(on){
+  settings.hidden = !on;
+  gear.setAttribute('aria-expanded', on ? 'true' : 'false');
+  if (on) refreshSettings();
+}
+gear.addEventListener('click', e => { e.stopPropagation(); openSettings(settings.hidden); });
+// Close on outside click or Escape \u2014 a panel that can only be dismissed by
+// finding the same small button again is a panel people leave open.
+document.addEventListener('click', e => {
+  if (!settings.hidden && !settings.contains(e.target)) openSettings(false);
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !settings.hidden) openSettings(false); });
+
+// --- activity ----------------------------------------------------------------
+// Answers "is it working, or is it stuck?" — the question this whole project
+// exists for — from events already in the stream. Nothing is asked of the
+// session; being watched stays free.
+//
+// Only events from the last two minutes count. Replay hands us history on every
+// page load, and an unpaired tool call from an hour ago would otherwise render
+// as a command running right now — a confident, wrong answer.
+const actEl = document.getElementById('act');
+const liveTools = new Map();      // tool_use_id -> what it is doing
+const agentSeen = new Map();      // agent_id -> last time it wrote anything
+let lastKind = null, lastKindAt = 0;
+const FRESH_MS = 120000, AGENT_IDLE_MS = 90000;
+
+function noteActivity(ev){
+  const t = Date.parse(ev.ts || '') || 0;
+  if (!t || Date.now() - t > FRESH_MS) return;      // replayed history, not now
+
+  // A subagent transcript being written IS the agent working. That is the
+  // measurement — not an inference from a start event with no matching end,
+  // because Claude Code never emits one.
+  if (ev.agent_id) agentSeen.set(ev.agent_id, Date.now());
+
+  if (ev.type === 'tool_use' && ev.body?.tool_use_id){
+    liveTools.set(ev.body.tool_use_id,
+      gist(ev.body.tool, ev.body.input) || ev.body.tool || 'tool');
+  }
+  if (ev.type === 'tool_result' && ev.body?.tool_use_id) liveTools.delete(ev.body.tool_use_id);
+  lastKind = ev.type; lastKindAt = Date.now();
+  paintActivity();
+}
+
+function paintActivity(){
+  const now = Date.now();
+  for (const [id, at] of agentSeen) if (now - at > AGENT_IDLE_MS) agentSeen.delete(id);
+  const agents = agentSeen.size;
+  let text = '';
+  if (agents) text = `${agents} agent${agents > 1 ? 's' : ''} working`;
+  else if (liveTools.size){
+    const one = [...liveTools.values()].pop();
+    text = liveTools.size > 1 ? `running ${liveTools.size} tools`
+                              : `running · ${String(one).slice(0, 44)}`;
+  }
+  else if (lastKind === 'thinking' && now - lastKindAt < 45000) text = 'thinking';
+  actEl.textContent = text;
+}
+setInterval(paintActivity, 3000);
+
+let lastHealth = null;
+function refreshSettings(){
+  const h = lastHealth;
+  if (!h){ setInfo.textContent = 'not connected'; return; }
+  const age = h.last_event_age_s;
+  setInfo.innerHTML =
+      `instance <strong>${esc(h.instance || '?')}</strong><br>`
+    + `viewers ${h.clients ?? '?'} \u00B7 epoch ${h.epoch} \u00B7 seq ${h.seq}<br>`
+    + `last event ${age === null ? 'never' : age + 's ago'}<br>`
+    + `identity <strong>${esc(h.write_path?.identity_source || '?')}</strong>`
+    + `${h.write_path?.identity_source === 'STUB' ? ' \u2014 assumed, not proven' : ''}<br>`
+    + `stop button ${h.write_path?.interrupt ? 'available' : 'disabled'}`;
+}
 applyEnterMode();
 
 // The header is fixed and wraps on narrow screens, so its height is not a
@@ -830,6 +964,10 @@ function setFavicon(name, pct){
 setInterval(async () => {
   try{
     const h = await (await fetch(BASE + '/health')).json();
+    lastHealth = h;
+    if (!settings.hidden) refreshSettings();
+    if (h.limits?.max_upload_bytes)
+      document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
     document.getElementById('title').textContent = `${h.instance} · session mirror`;
     document.title = `${h.instance} · mirror`;
     // Who else is watching. Two browsers can both type into one live session

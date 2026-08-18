@@ -668,6 +668,9 @@ const server = http.createServer(async (req, res) => {
       counters: { ...stats },
       pending_permissions: pending,
       pending_age_s: pendingAt ? Math.round((Date.now() - pendingAt)/1000) : null,
+      // Published so the UI states the real limit rather than a hardcoded one
+      // that drifts out of agreement with the server.
+      limits: { max_upload_bytes: MAX_UPLOAD_BYTES },
       uptime_s: Math.round((Date.now() - stats.startedAt) / 1000),
       session: usage ? {
         model: usage.model,
@@ -774,5 +777,26 @@ server.listen(cfg.port, cfg.bind, () => {
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => { log(`${sig} — shutting down`); tailer.stop(); server.close(() => process.exit(0)); });
+  process.on(sig, () => {
+    log(`${sig} — shutting down`);
+    tailer.stop();
+
+    // End the SSE streams FIRST.
+    //
+    // server.close() stops accepting new connections and then waits for the
+    // open ones to finish — and an SSE stream never finishes, by design. So a
+    // mirror with a browser attached would release its listening socket and
+    // then live forever, invisible to `ss -lntp` but present in `ps`.
+    //
+    // Measured, not theorised: a SIGTERM'd mirror was still running four
+    // minutes later, and the restart after it picked that pid instead of the
+    // live one and failed EADDRINUSE against the process it meant to replace.
+    // Silent, and it makes "just restart the mirror" advice wrong.
+    for (const c of clients) { try { c.res.end(); } catch { /* already gone */ } }
+    clients.clear();
+
+    server.close(() => process.exit(0));
+    // Backstop: no socket in a strange state gets to keep this process alive.
+    setTimeout(() => process.exit(0), 3000).unref();
+  });
 }
