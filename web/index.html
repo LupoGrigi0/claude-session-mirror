@@ -142,7 +142,8 @@
                 padding:8px 12px;background:var(--raised)}
   .filecard .dl:hover{border-color:var(--cairn)}
   #attach{background:none;border:1px solid var(--line);border-radius:10px;color:var(--faint);
-          height:42px;padding:0 12px;font-size:17px;cursor:pointer;flex:none;line-height:1}
+          height:42px;padding:0 12px;cursor:pointer;flex:none;
+          display:flex;align-items:center;justify-content:center}
   #attach:hover{border-color:var(--cairn);color:var(--cairn)}
   #dropzone{position:fixed;inset:0;z-index:20;display:none;pointer-events:none;
             background:rgba(18,19,28,.72);border:3px dashed var(--cairn)}
@@ -217,7 +218,7 @@
   <div class="sect">
     <div class="lbl">Sending files</div>
     <div class="hint">Paste a screenshot straight into the message box, drop a file
-      anywhere on this page, or use 📎. Limit <span id="uplimit">25 MB</span>.
+      anywhere on this page, or use the paperclip. Limit <span id="uplimit">25 MB</span>.
       Files sent <em>to</em> you appear in the feed as download links.</div>
   </div>
   <div class="sect">
@@ -244,7 +245,17 @@
 <div id="composer">
   <div class="row">
     <input type="file" id="file" multiple hidden>
-    <button id="attach" title="Attach a file — or just paste a screenshot, or drop one anywhere">📎</button>
+    <!-- Inline SVG, not an emoji. 📎 rendered as a placeholder box on Windows
+         Chrome — a glyph that depends on the viewer's font stack is a glyph
+         that will be missing on someone's machine, and I cannot see the screen
+         it renders on. -->
+    <button id="attach" title="Attach a file — or just paste a screenshot, or drop one anywhere"
+            aria-label="Attach a file">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+      </svg>
+    </button>
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
     <button id="stop" title="Interrupt the current turn (sends ESC)">Stop</button>
     <button id="send" disabled>Send</button>
