@@ -412,6 +412,31 @@ function prepend(nodes){
 
 let earliestSeq = null, loadingEarlier = false;
 const earlierBtn = document.getElementById('earlier');
+
+// Scrolling to the top should say so, and say what is NOT there.
+//
+// Measured on this instance: the log begins 27 seconds after the session did,
+// so the very first exchange — Lupo's wake message and the first reply — was
+// written before the mirror existed and is not recoverable from the log. Four
+// events. Rebuilding 2.5 MB to recover them would also destroy the `file`
+// events, which are not derivable from the transcript.
+//
+// So the fix is honesty rather than reconstruction. A view that simply stops
+// implies it reached the beginning; this states where the record starts and
+// that the session started earlier. Same rule as window_start: never let a
+// partial view look complete.
+let headMarked = false;
+function markHead(logStart){
+  if (headMarked) return;
+  headMarked = true;
+  const d = document.createElement('div');
+  d.className = 'divider ev headmark';
+  const when = logStart ? new Date(logStart).toLocaleString() : null;
+  d.textContent = when
+    ? `beginning of the mirror log · ${when} — the session itself started earlier, before the mirror was running`
+    : 'beginning of the mirror log — anything earlier predates the mirror';
+  prepend([d]);
+}
 earlierBtn.addEventListener('click', async () => {
   if (loadingEarlier || !earliestSeq) return;
   const guard = setTimeout(() => {           // never leave it stuck on 'loading…'
@@ -435,6 +460,7 @@ earlierBtn.addEventListener('click', async () => {
     earliestSeq = d.first_seq ?? earliestSeq;
     earlierBtn.classList.toggle('show', Boolean(d.more));
     earlierBtn.textContent = 'load earlier';
+    if (!d.more) markHead(d.log_start);
   } catch (err) { earlierBtn.textContent = 'load earlier (failed)'; console.error(err); }
   clearTimeout(guard);
   loadingEarlier = false;
@@ -602,6 +628,9 @@ es.addEventListener('mirror', e => {
       // rather than letting a partial view look complete.
       earliestSeq = ev.body?.first_seq ?? null;
       earlierBtn.classList.toggle('show', Boolean(ev.body?.more));
+      // The replay already reached the head — say so now rather than waiting
+      // for a "load earlier" click that will never come.
+      if (!ev.body?.more) markHead(ev.body?.log_start);
       return;
     }
     if (earliestSeq === null) earliestSeq = ev.seq;

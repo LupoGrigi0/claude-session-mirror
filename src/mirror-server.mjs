@@ -757,6 +757,10 @@ const server = http.createServer(async (req, res) => {
       events: page,
       first_seq: page.length ? page[0].seq : null,
       more: page.length ? page[0].seq > 1 : false,
+      // Where the RECORD begins — not where the session did. The UI says so
+      // when you reach the top, rather than letting an exhausted list imply
+      // it found the beginning.
+      log_start: eventLog.firstTs(),
     }));
     return;
   }
@@ -855,7 +859,8 @@ const server = http.createServer(async (req, res) => {
       // rather than silently pretending this is the whole conversation.
       sseWrite(client, { epoch: eventLog.epoch, seq: backlog[0].seq - 1,
                          type: 'window_start', ts: new Date().toISOString(),
-                         body: { first_seq: backlog[0].seq, more: backlog[0].seq > 1 } });
+                         body: { first_seq: backlog[0].seq, more: backlog[0].seq > 1,
+                                 log_start: eventLog.firstTs() } });
     }
     for (const ev of backlog) sseWrite(client, ev);
     clients.add(client);

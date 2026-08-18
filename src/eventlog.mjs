@@ -146,6 +146,29 @@ export class EventLog {
     return out.slice(-limit);
   }
 
+  /**
+   * Timestamp of the OLDEST event still in the log, or null.
+   *
+   * Lets the UI say where the record begins instead of just running out of
+   * events — a view that simply stops implies it reached the beginning of the
+   * session, and on this instance the log starts 27 seconds after the session
+   * did. Cached: the head of an append-only file never changes.
+   */
+  firstTs() {
+    if (this._firstTs !== undefined) return this._firstTs;
+    this._firstTs = null;
+    try {
+      const fd = fs.openSync(this.logPath, 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(fs.fstatSync(fd).size, 8192));
+        fs.readSync(fd, buf, 0, buf.length, 0);
+        const line = buf.toString('utf8').split('\n')[0];
+        if (line) this._firstTs = JSON.parse(line).ts || null;
+      } finally { fs.closeSync(fd); }
+    } catch { /* empty or unreadable — null is the honest answer */ }
+    return this._firstTs;
+  }
+
   subscribe(fn) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
