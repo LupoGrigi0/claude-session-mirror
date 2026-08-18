@@ -129,7 +129,12 @@
   .perm .allow{background:var(--human);color:#12131c}
   .perm .deny{background:none;color:var(--err);border:1px solid var(--err)}
   .perm button:disabled{opacity:.45;cursor:default}
-  .perm .rid{font:10px var(--mono);color:var(--faint);margin-top:3px}
+  /* The id is FIVE letters (a-z minus 'l', which reads as 1 or I) — Crossing
+     sized it to be typed on a phone for the Telegram "yes <id>" path, and to
+     survive being read off a screenshot. So it is legible, not decorative. */
+  .perm .rid{font:11px var(--mono);color:var(--faint);margin-top:4px}
+  .perm .rid b{color:var(--cairn);font-size:13px;letter-spacing:1.5px;font-weight:700}
+  .perm.done{opacity:.5;transition:opacity .3s}
   @media (max-width:560px){ .perm{flex-wrap:wrap} .perm .acts{padding-top:6px;width:100%} }
 
   /* files — an image is shown, anything else is a link that downloads */
@@ -931,35 +936,69 @@ function confirmFromStream(ev){
 const permsBox = document.getElementById('perms');
 const permsInner = permsBox.querySelector('.inner');
 
+// Rendered BY KEY, never rebuilt wholesale.
+//
+// Bastion measured the real behaviour: two prompts per ordinary exchange is
+// NORMAL, not an edge case — the mind's own `reply` call queues ahead of the
+// Bash you meant to approve. That is how he approved the wrong one.
+//
+// Requirement 1 says a verdict binds to request_id, and it always did. But
+// rebuilding innerHTML on every push made the LIST reflow: resolve one card and
+// the others jump position, under a finger that is already moving toward where a
+// card used to be. Binding correctly and then moving the target is still a trap.
+//
+// So cards are created once, updated in place, and never reordered while they
+// live. A card the human just answered is held briefly showing its outcome
+// rather than vanishing and dragging the rest upward.
+const permCards = new Map();          // request_id -> element
+
 function renderPermissions(list){
   const items = Array.isArray(list) ? list : [];
-  permsBox.classList.toggle('show', items.length > 0);
-  document.documentElement.style.setProperty('--permh',
-    items.length ? permsBox.offsetHeight + 'px' : '0px');
-  if (!items.length){ permsInner.innerHTML = ''; syncHeaderHeight(); return; }
+  const live = new Set(items.map(p => p.request_id));
 
-  permsInner.innerHTML = items.map(pmt => `
-    <div class="perm" data-rid="${esc(pmt.request_id)}">
+  for (const pmt of items) {
+    if (permCards.has(pmt.request_id)) continue;   // already on screen: leave it alone
+    const card = document.createElement('div');
+    card.className = 'perm';
+    card.dataset.rid = pmt.request_id;
+    card.innerHTML = `
       <div class="what">
         <div class="tool">${esc(pmt.tool_name || 'tool')} wants permission</div>
         <div class="cmd">${esc(pmt.input_preview || pmt.description || '(no preview available)')}</div>
-        <div class="rid">id ${esc(pmt.request_id)}${pmt.received_at ? ' · ' + esc(pmt.received_at) : ''}</div>
+        <div class="rid"><b>${esc(pmt.request_id)}</b>${pmt.received_at ? ' · ' + esc(pmt.received_at) : ''}</div>
       </div>
       <div class="acts">
         <button class="allow">Allow</button>
         <button class="deny">Deny</button>
-      </div>
-    </div>`).join('');
-
-  permsInner.querySelectorAll('.perm').forEach(card => {
-    const rid = card.dataset.rid;      // the ID, never the index
+      </div>`;
+    const rid = pmt.request_id;        // the ID, never the index
     card.querySelector('.allow').addEventListener('click', () => verdict(card, rid, 'allow'));
     card.querySelector('.deny').addEventListener('click', () => verdict(card, rid, 'deny'));
-  });
+    permsInner.appendChild(card);
+    permCards.set(rid, card);
+  }
+
+  // Gone from the source of truth. A card the human just acted on lingers a
+  // moment showing what happened; one resolved elsewhere (terminal, Telegram,
+  // timeout) says so rather than silently disappearing.
+  for (const [rid, card] of permCards) {
+    if (live.has(rid) || card.dataset.closing) continue;
+    card.dataset.closing = '1';
+    card.classList.add('done');
+    card.querySelectorAll('button').forEach(b => b.disabled = true);
+    if (!card.dataset.acted) {
+      const r = card.querySelector('.rid');
+      if (r) r.textContent = 'resolved elsewhere';
+    }
+    setTimeout(() => { card.remove(); permCards.delete(rid); syncHeaderHeight(); }, 2500);
+  }
+
+  permsBox.classList.toggle('show', permsInner.children.length > 0);
   syncHeaderHeight();
 }
 
 async function verdict(card, request_id, behavior){
+  card.dataset.acted = '1';       // so the reaper reports the outcome, not "resolved elsewhere"
   card.querySelectorAll('button').forEach(b => b.disabled = true);
   const rid = card.querySelector('.rid');
   const was = rid.textContent;

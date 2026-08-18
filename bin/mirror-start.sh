@@ -63,17 +63,28 @@ INSTANCE=$(python3 -c "import json;print(json.load(open('$IDENTITY'))['instanceI
 CHANNEL_PORT=$(python3 -c "import json;print(json.load(open('$IDENTITY')).get('channelPort',''))")
 [[ -n "$INSTANCE" ]] || die "could not read instanceId from $IDENTITY"
 
+# State lives beside the IDENTITY FILE, not beside $HOME.
+#
+# For every instance so far those are the same directory, so this changes
+# nothing for them. They are NOT the same for Bastion: he runs as root with
+# HOME=/root while his instance dir and .hacs-identity live under
+# /mnt/.../Bastion-3012. Keying off $HOME would scatter his mirror state into
+# /root and — the part that actually matters — would put the permissions-only
+# marker somewhere other than beside the instance it is meant to protect.
+INSTANCE_DIR="$(cd "$(dirname "$IDENTITY")" && pwd)"
+
 # ---- find my live transcript --------------------------------------------------
 # Skipped entirely in permissions mode. Not "found and then ignored" — never
 # located, never opened, never handed to the server. The privacy guarantee should
 # be visible here too, not only in the code that would have read it.
 TRANSCRIPT=""
 if [[ $PERMS_ONLY -eq 0 ]]; then
-  # The project slug is the cwd with every non-alphanumeric char replaced by '-'.
-  # For chassis instances HOME *is* the cwd, which is what keeps the slug stable
-  # across teleports.
-  SLUG=$(echo "$HOME" | sed 's/[^a-zA-Z0-9]/-/g')
-  PROJ="$HOME/.claude/projects/$SLUG"
+  # The project slug is the session's cwd with every non-alphanumeric char
+  # replaced by '-'. For a chassis instance the instance directory IS the cwd,
+  # which is what keeps the slug stable across teleports — and it stays correct
+  # for a detached home, where $HOME would have pointed somewhere else entirely.
+  SLUG=$(echo "$INSTANCE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')
+  PROJ="$INSTANCE_DIR/.claude/projects/$SLUG"
   [[ -d "$PROJ" ]] || die "no project dir at $PROJ"
 
   # Newest .jsonl = the live session. Never cache a session id: teleports and
@@ -101,7 +112,7 @@ BIND=${MIRROR_BIND:-${TS_IP:-127.0.0.1}}
 export MIRROR_INSTANCE="$INSTANCE"
 export MIRROR_DISPLAY="${MIRROR_DISPLAY:-${INSTANCE%%-*}}"
 export MIRROR_TRANSCRIPT="$TRANSCRIPT"
-export MIRROR_DATA_DIR="${MIRROR_DATA_DIR:-$HOME/.claude-mirror}"
+export MIRROR_DATA_DIR="${MIRROR_DATA_DIR:-$INSTANCE_DIR/.claude-mirror}"
 export MIRROR_PORT="$PORT"
 export MIRROR_BIND="$BIND"
 export MIRROR_BASE_PATH="${MIRROR_BASE_PATH:-/${INSTANCE%%-*}}"
