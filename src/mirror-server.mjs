@@ -55,7 +55,26 @@ const cfg = {
   // trusted one — so a token proves "a human authorized this" alongside uid
   // proving "which local process". Pass-through built now so the patch slots in.
   verdictToken: process.env.MIRROR_VERDICT_TOKEN || '',
+
+  // 'full'        — tail the transcript and publish the session (the default)
+  // 'permissions' — publish NOTHING about the session except pending permission
+  //                 requests, and accept verdicts. For Bastion, who runs as root
+  //                 without --dangerously-skip-permissions: he needs the approval
+  //                 panel, and a transcript mirror of a root session would publish
+  //                 every config read and every path on the box to a web page.
+  //
+  // This is enforced by ABSENT CAPABILITY, not by a hidden button. Every route
+  // that could disclose session content is refused at the server in this mode.
+  mode: process.env.MIRROR_MODE === 'permissions' ? 'permissions' : 'full',
 };
+
+// Writing into a live session is a separate grant from watching one. It used to
+// be implied by MIRROR_CHANNEL_URL — but permissions mode NEEDS that URL to poll
+// and to deliver verdicts, so the two must be decoupled or enabling approvals
+// would silently enable injection.
+cfg.allowSend = process.env.MIRROR_ALLOW_SEND === '1' ? true
+              : process.env.MIRROR_ALLOW_SEND === '0' ? false
+              : cfg.mode === 'full' && Boolean(cfg.channelUrl);
 
 /** Strip the base path; returns null when the request isn't ours. */
 function route(pathname) {
@@ -65,8 +84,12 @@ function route(pathname) {
   return null;
 }
 
-if (!cfg.transcript) {
+if (!cfg.transcript && cfg.mode === 'full') {
   console.error('MIRROR_TRANSCRIPT is required (path to the session .jsonl)');
+  process.exit(1);
+}
+if (cfg.mode === 'permissions' && !cfg.channelUrl) {
+  console.error('MIRROR_MODE=permissions requires MIRROR_CHANNEL_URL — there is nothing to do without it');
   process.exit(1);
 }
 fs.mkdirSync(cfg.dataDir, { recursive: true });
@@ -83,7 +106,7 @@ log(`files: inbox=${files.inbox} outbox=${files.outbox} (${files.primeOutbox()} 
 
 // --- schema canary -----------------------------------------------------------
 // Advisory, never fatal: a renamed field should page us, not take the mirror down.
-try {
+if (cfg.mode === 'full') try {
   const sample = fs.readFileSync(cfg.transcript, 'utf8').split('\n').slice(-400);
   const canary = schemaCanary(sample);
   if (canary.ok) log(`schema canary OK (${canary.stats.parsed} sampled)`);
@@ -99,7 +122,10 @@ const CONTEXT_WINDOW = Number(process.env.MIRROR_CONTEXT_WINDOW || 1_000_000);
 const REPLAY_LIMIT   = Number(process.env.MIRROR_REPLAY_LIMIT || 300);
 
 // --- the tailer is the source of CONTENT -------------------------------------
-const tailer = new TranscriptTailer({
+// In permissions mode it is never constructed. The transcript is the ONLY thing
+// that turns into published session content, so not building the reader is the
+// whole privacy guarantee — there is no code path from the session to a viewer.
+const tailer = cfg.mode !== 'full' ? null : new TranscriptTailer({
   transcriptPath: cfg.transcript,
   ctx: {
     instance: cfg.instance,
@@ -348,6 +374,27 @@ const server = http.createServer(async (req, res) => {
   const p = route(url.pathname);
   if (p === null) { res.writeHead(404).end('not found'); return; }
 
+  // ---- permissions mode: refuse every route that could disclose the session.
+  //
+  // Deliberately ONE list in ONE place, so the whole disclosure surface can be
+  // audited without reading the rest of the file. Enforced at the server, not by
+  // hiding controls: the guarantee has to be an absent capability, not an
+  // unrendered button.
+  //
+  // /events stays open because it is the transport for the permission panel —
+  // but its REPLAY is suppressed separately below. A log written during an
+  // earlier run in full mode is still on disk, and replaying it here would hand
+  // back the very session content this mode exists to withhold.
+  if (cfg.mode === 'permissions') {
+    for (const r of ['/history', '/blob/', '/file/', '/upload']) {
+      if (p === r || p.startsWith(r)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+           .end(JSON.stringify({ ok: false, error: 'not available in permissions mode' }));
+        return;
+      }
+    }
+  }
+
   // ---- POST /hook : FAST ACK. Do not add work here. ----
   if (req.method === 'POST' && p === '/hook') {
     res.writeHead(204).end();          // ACK first — the session is blocked
@@ -359,6 +406,14 @@ const server = http.createServer(async (req, res) => {
 
   // ---- POST /send : the write leg. Browser -> channel server -> live session.
   if (req.method === 'POST' && p === '/send') {
+    // Writing into a session is a separate grant from watching one. Approvals
+    // need the channel URL, so deriving "can send" from "has a channel URL"
+    // would make enabling the permission panel silently enable injection too.
+    if (!cfg.allowSend) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+         .end(JSON.stringify({ ok: false, error: 'input is not enabled on this mirror' }));
+      return;
+    }
     if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
     // Require a non-simple content type. A form/img/script cross-origin POST
     // cannot set this, so it forces a preflight that sameOrigin() then rejects.
@@ -657,6 +712,10 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       ok: true,
       instance: cfg.instance,
+      // Stated plainly so a viewer can tell which mirror they are looking at
+      // without inferring it from what happens to be missing.
+      mode: cfg.mode,
+      publishes_session: cfg.mode === 'full',
       epoch: eventLog.epoch,
       seq: eventLog.seq,
       clients: clients.size,
@@ -682,6 +741,7 @@ const server = http.createServer(async (req, res) => {
       } : null,
       write_path: {
         channel_url: cfg.channelUrl || null,
+        send: cfg.allowSend,
         interrupt: Boolean(cfg.tmuxSession),
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
@@ -716,7 +776,10 @@ const server = http.createServer(async (req, res) => {
     log(`client: ${client.info.platform}${client.info.mobile ? ' (mobile)' : ''}`
       + `${client.info.viewport ? ' ' + client.info.viewport : ''}`
       + `${client.info.dpr ? ' @' + client.info.dpr + 'x' : ''}`);
-    const backlog = eventLog.replay(afterSeq, REPLAY_LIMIT);
+    // No replay in permissions mode. Nothing is appended to the log there, but
+    // the FILE may still hold a full-mode history from an earlier run — and
+    // serving that would defeat the entire point of the mode.
+    const backlog = cfg.mode === 'full' ? eventLog.replay(afterSeq, REPLAY_LIMIT) : [];
     if (backlog.length) {
       // Tell the client where the window starts so it can offer "load earlier"
       // rather than silently pretending this is the whole conversation.
@@ -748,7 +811,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
     try {
       let html = fs.readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-      html = html.replace('__BASE_PATH__', cfg.basePath);
+      html = html.replace('__BASE_PATH__', cfg.basePath)
+                 // Injected rather than discovered from /health, so the page is
+                 // never briefly dressed as a full mirror before finding out it
+                 // isn't one. The server-side gates are the actual control; this
+                 // only makes the page tell the truth from the first paint.
+                 .replace('__MIRROR_MODE__', cfg.mode);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
     } catch (err) {
       res.writeHead(500).end(`cannot read web/index.html: ${err.message}`);
@@ -773,13 +841,14 @@ server.on('error', (err) => {
 server.listen(cfg.port, cfg.bind, () => {
   log(`listening on http://${cfg.bind}:${cfg.port}${cfg.basePath || ''}  (events, health, hook, blob)`);
   // Everything is wired now — safe to start emitting.
-  tailer.start({ fromStart: cfg.fromStart });
+  if (tailer) tailer.start({ fromStart: cfg.fromStart });
+  else log('MODE=permissions — no transcript is read, nothing about this session is published');
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     log(`${sig} — shutting down`);
-    tailer.stop();
+    if (tailer) tailer.stop();
 
     // End the SSE streams FIRST.
     //

@@ -214,6 +214,10 @@
   #earlier:hover{color:var(--fg);border-color:var(--cairn)}
   #earlier.show{display:block}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
+  .empty.permsonly{font-style:normal;max-width:520px;margin:0 auto;text-align:left;
+                   line-height:1.65;color:var(--dim);border:1px solid var(--line);
+                   border-radius:12px;background:var(--raised);padding:20px 22px}
+  .empty.permsonly strong{color:var(--cairn)}
 </style>
 </head>
 <body>
@@ -556,6 +560,10 @@ function render(ev, quiet){
 // EventSource handles Last-Event-ID and reconnection natively, which is exactly
 // why the server speaks plain SSE with id: <epoch>.<seq>.
 const BASE = '__BASE_PATH__';
+// 'full' or 'permissions'. Injected server-side so the first paint is honest.
+// The real enforcement is in the server — every disclosing route 404s in
+// permissions mode — so this is presentation, never the guarantee.
+const MODE = '__MIRROR_MODE__';
 const clientParams = new URLSearchParams({
   vw: String(window.innerWidth), vh: String(window.innerHeight),
   dpr: String(window.devicePixelRatio || 1),
@@ -744,6 +752,26 @@ function syncHeaderHeight(){
 syncHeaderHeight();
 window.addEventListener('resize', syncHeaderHeight);
 new ResizeObserver(syncHeaderHeight).observe(document.querySelector('header'));
+
+// --- permissions-only presentation -------------------------------------------
+// Nothing here is a security control — the server refuses the routes. This just
+// stops the page from showing an empty feed and a dead composer, which would
+// read as "the mirror is broken" rather than "this mirror deliberately shows
+// you nothing about the session."
+if (MODE === 'permissions'){
+  document.getElementById('composer').style.display = 'none';
+  document.getElementById('earlier')?.remove();
+  const empty = document.getElementById('empty');
+  if (empty){
+    empty.classList.add('permsonly');
+    empty.innerHTML =
+        `<strong>Approvals only.</strong><br><br>`
+      + `This mirror does not read the session transcript. No prose, no commands,`
+      + ` no tool output, no subagent work — nothing about this session is published here.<br><br>`
+      + `Permission requests appear at the top when there are any, with the literal`
+      + ` command, and disappear once answered.`;
+  }
+}
 
 // Same treatment for the composer: it grows as you type and wraps to two rows
 // on a phone, so the feed's bottom padding has to follow it rather than assume.
