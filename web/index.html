@@ -191,7 +191,23 @@
   #act{color:var(--cairn)}
   #act:not(:empty)::after{content:"·";color:var(--faint);margin:0 6px}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
-  main{padding-bottom:120px}
+  /* Measured, not guessed: the composer wraps to two rows on a phone, so a
+     constant here buries the newest message behind it — the one place the feed
+     can least afford to hide something. */
+  main{padding-bottom:calc(var(--compb,120px) + 20px)}
+
+  /* Phone: give the textarea the whole width and put the controls under it.
+     Adding the paperclip made this a four-control row, which squeezed the input
+     to a sliver and clipped its placeholder. Reported from a phone screenshot —
+     I cannot see the screen this renders on. */
+  @media (max-width:560px){
+    #composer{padding:8px 10px}
+    #composer .row{flex-wrap:wrap;gap:8px}
+    #input{order:1;flex:1 0 100%;min-height:46px}
+    #attach{order:2}
+    #stop{order:3;margin-left:auto}
+    #send{order:4}
+  }
   #earlier{display:none;margin:8px auto 16px;padding:7px 14px;cursor:pointer;
            background:var(--raised);color:var(--dim);border:1px solid var(--line);
            border-radius:8px;font:12px var(--mono)}
@@ -728,6 +744,15 @@ function syncHeaderHeight(){
 syncHeaderHeight();
 window.addEventListener('resize', syncHeaderHeight);
 new ResizeObserver(syncHeaderHeight).observe(document.querySelector('header'));
+
+// Same treatment for the composer: it grows as you type and wraps to two rows
+// on a phone, so the feed's bottom padding has to follow it rather than assume.
+const composerEl = document.getElementById('composer');
+function syncComposerHeight(){
+  document.documentElement.style.setProperty('--compb', composerEl.offsetHeight + 'px');
+}
+syncComposerHeight();
+new ResizeObserver(syncComposerHeight).observe(composerEl);
 
 input.addEventListener('keydown', e => {
   if (!enterSends) return;                      // Enter is a newline; Send sends
