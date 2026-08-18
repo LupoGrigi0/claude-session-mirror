@@ -132,6 +132,23 @@
   .perm .rid{font:10px var(--mono);color:var(--faint);margin-top:3px}
   @media (max-width:560px){ .perm{flex-wrap:wrap} .perm .acts{padding-top:6px;width:100%} }
 
+  /* files — an image is shown, anything else is a link that downloads */
+  .filecard{padding:8px !important}
+  .filecard .shot{display:block;max-width:min(420px,100%);max-height:340px;
+                  border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
+  .filecard .fmeta{font:11px var(--mono);color:var(--faint);margin-top:6px}
+  .filecard .dl{display:inline-block;font:13px var(--mono);color:var(--cairn);
+                text-decoration:none;border:1px solid var(--line);border-radius:8px;
+                padding:8px 12px;background:var(--raised)}
+  .filecard .dl:hover{border-color:var(--cairn)}
+  #attach{background:none;border:1px solid var(--line);border-radius:10px;color:var(--faint);
+          height:42px;padding:0 12px;font-size:17px;cursor:pointer;flex:none;line-height:1}
+  #attach:hover{border-color:var(--cairn);color:var(--cairn)}
+  #dropzone{position:fixed;inset:0;z-index:20;display:none;pointer-events:none;
+            background:rgba(18,19,28,.72);border:3px dashed var(--cairn)}
+  #dropzone.show{display:grid;place-items:center}
+  #dropzone span{font:600 17px/1.4 var(--mono);color:var(--cairn)}
+
   /* composer */
   #composer{position:fixed;left:0;right:0;bottom:0;background:var(--panel);
             border-top:1px solid var(--line);padding:10px 16px;z-index:6}
@@ -170,9 +187,12 @@
   <div class="meta"><span id="stat">connecting…</span></div>
 </header>
 <div id="perms"><div class="inner"></div></div>
+<div id="dropzone"><span>drop to send</span></div>
 <main id="feed"><button id="earlier">load earlier</button><div class="empty" id="empty">waiting for the stream…</div></main>
 <div id="composer">
   <div class="row">
+    <input type="file" id="file" multiple hidden>
+    <button id="attach" title="Attach a file — or just paste a screenshot, or drop one anywhere">📎</button>
     <textarea id="input" rows="1" placeholder="Message Cairn…  (Enter to send, Shift+Enter for a newline)"></textarea>
     <button id="stop" title="Interrupt the current turn (sends ESC)">Stop</button>
     <button id="entertoggle" title="Toggle whether Enter sends"></button>
@@ -185,6 +205,11 @@
 /** Escape for HTML interpolation. Everything untrusted goes through this. */
 const esc = t => String(t ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const fmtBytes = n => !Number.isFinite(n) ? '?'
+  : n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n/1024).toFixed(1)} KB`
+  : `${(n/1048576).toFixed(1)} MB`;
 
 const feed = document.getElementById('feed');
 const dot = document.getElementById('dot');
@@ -410,6 +435,34 @@ function render(ev, quiet){
     add(d); return;
   }
 
+  if (ev.type === 'file'){
+    const b = ev.body || {};
+    // Escaping makes a URL safe to sit in an attribute; it does NOT make the
+    // URL safe to follow — javascript: survives escaping intact. So the href
+    // is only honoured when it is one of ours.
+    const href = (typeof b.url === 'string' && b.url.startsWith(BASE + '/file/')) ? b.url : '';
+    const { wrap, node } = header(ev, b.direction === 'in' ? 'uploaded' : 'sent you a file');
+    const box = document.createElement('div');
+    box.className = `ev ${wrap}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble filecard';
+    const meta = `${esc(b.name || 'file')} · ${fmtBytes(b.bytes)}`;
+    if (!href){
+      bubble.innerHTML = `<div class="fmeta">${meta} — unavailable</div>`;
+    } else if (b.inline){
+      bubble.innerHTML =
+        `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">`
+      + `<img class="shot" src="${esc(href)}" alt="${esc(b.name || 'image')}" loading="lazy"></a>`
+      + `<div class="fmeta">${meta}</div>`;
+    } else {
+      bubble.innerHTML =
+        `<a class="dl" href="${esc(href)}" target="_blank" rel="noopener noreferrer" download>`
+      + `⤓ ${esc(b.name || 'file')}</a><div class="fmeta">${fmtBytes(b.bytes)}</div>`;
+    }
+    box.appendChild(node); box.appendChild(bubble);
+    add(box); return;
+  }
+
   // text / user_message / anything else with prose
   const { wrap, node } = header(ev, ev.agent_id ? 'agent' : null);
   const box = document.createElement('div');
@@ -434,7 +487,15 @@ const es = new EventSource(BASE + '/events?' + clientParams);
 es.addEventListener('mirror', e => {
   try {
     const ev = JSON.parse(e.data);
-    if (ev.type === 'permissions'){ renderPermissions(ev.body?.pending); return; }
+    if (ev.type === 'permissions'){
+      // ONLY live state may draw cards. The server marks live pushes
+      // `ephemeral` and never logs them; anything without that flag is a
+      // replayed snapshot of a moment that has passed, and rendering it would
+      // offer Allow/Deny on requests resolved hours ago. Older logs still
+      // contain such entries, so this also heals history already on disk.
+      if (ev.ephemeral) renderPermissions(ev.body?.pending);
+      return;
+    }
     if (ev.type === 'window_start'){
       // The server sent a bounded tail, not the whole log. Say so honestly
       // rather than letting a partial view look complete.
@@ -564,6 +625,87 @@ async function send(){
   inFlight = false;
   refresh(); input.focus();
 }
+
+// --- attachments -------------------------------------------------------------
+// Three ways in, because the one that matters most is the one nobody clicks:
+// paste. A screenshot lives on the clipboard, and making the human save it to
+// disk first, then find it in a picker, is most of the friction.
+//
+// Raw bytes with the name in X-Filename, not multipart: a custom header cannot
+// be set cross-origin without a preflight, which gives the upload the same CSRF
+// property /send gets from requiring JSON — and no hand-written parser.
+const fileInput = document.getElementById('file');
+const attachBtn = document.getElementById('attach');
+let uploading = 0;
+
+async function upload(file){
+  if (!file || !file.size) return;
+  uploading++;
+  refresh();
+  const label = file.name || 'pasted image';
+  sendStat.textContent = `uploading ${label} (${fmtBytes(file.size)})…`;
+  try{
+    const r = await fetch(BASE + '/upload', {
+      method: 'POST',
+      headers: {
+        // encodeURIComponent because a header must be latin-1; the server
+        // decodes, then rebuilds the name from safe characters regardless.
+        'X-Filename': encodeURIComponent(label),
+        'Content-Type': 'application/octet-stream',
+      },
+      body: file,
+    });
+    const out = await r.json().catch(()=>({}));
+    if (r.ok && out.ok){
+      // No optimistic echo: the file appears when the mirror event lands, the
+      // same way a sent message is confirmed by observation rather than claim.
+      sendStat.textContent = `sent ${out.name} (${fmtBytes(out.bytes)})`;
+      setTimeout(()=>{ if(!uploading) sendStat.textContent=''; }, 4000);
+    } else if (r.status === 413){
+      sendStat.textContent = `too large: ${label} is ${fmtBytes(file.size)}, limit is ${fmtBytes(out.limit_bytes)}`;
+    } else {
+      sendStat.textContent = `upload failed: ${out.error || r.status}`;
+    }
+  } catch(err){
+    sendStat.textContent = `upload failed: ${err.message}`;
+  }
+  uploading--;
+  refresh();
+}
+
+const uploadAll = list => { for (const f of list) upload(f); };
+
+attachBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { uploadAll(fileInput.files); fileInput.value = ''; });
+
+// Paste: a screenshot arrives as a File with no useful name, so give it one.
+input.addEventListener('paste', e => {
+  const items = [...(e.clipboardData?.files || [])];
+  if (!items.length) return;                 // plain text paste — leave it alone
+  e.preventDefault();
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  for (const f of items){
+    const named = f.name && f.name !== 'image.png' ? f
+      : new File([f], `pasted-${stamp}.${(f.type.split('/')[1] || 'png')}`, { type: f.type });
+    upload(named);
+  }
+});
+
+// Drop anywhere on the page. dragover must be cancelled or the browser
+// navigates away to the file — losing the session for a mis-aimed drop.
+const dz = document.getElementById('dropzone');
+let dragDepth = 0;
+window.addEventListener('dragover', e => { e.preventDefault(); });
+window.addEventListener('dragenter', e => {
+  if (![...(e.dataTransfer?.types||[])].includes('Files')) return;
+  dragDepth++; dz.classList.add('show');
+});
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0){ dragDepth = 0; dz.classList.remove('show'); } });
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dragDepth = 0; dz.classList.remove('show');
+  uploadAll(e.dataTransfer?.files || []);
+});
 
 /** Called for every inbound event — confirms our own sends by observation. */
 function confirmFromStream(ev){

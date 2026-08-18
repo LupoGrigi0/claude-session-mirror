@@ -29,6 +29,7 @@ import { EventLog } from './eventlog.mjs';
 import { TranscriptTailer } from './tailer.mjs';
 import { schemaCanary } from './normalizer.mjs';
 import { resolveIdentity, senderAddress, stubIdentity } from './identity.mjs';
+import { FileStore, MAX_UPLOAD_BYTES, isInlineImage } from './files.mjs';
 import { execFile } from 'node:child_process';
 
 const cfg = {
@@ -73,6 +74,12 @@ fs.mkdirSync(cfg.dataDir, { recursive: true });
 const log = (m) => console.log(`[mirror] ${new Date().toISOString()} ${m}`);
 const eventLog = new EventLog(cfg.dataDir, cfg.instance);
 log(`instance=${cfg.instance} epoch=${eventLog.epoch} resuming from seq=${eventLog.seq}`);
+
+// Inbound and outbound files. Adopting the existing outbox at startup (rather
+// than announcing it) is the restart-safety lesson from the tailer, applied
+// before it can bite a second time.
+const files = new FileStore(cfg.dataDir);
+log(`files: inbox=${files.inbox} outbox=${files.outbox} (${files.primeOutbox()} already present, not re-announced)`);
 
 // --- schema canary -----------------------------------------------------------
 // Advisory, never fatal: a renamed field should page us, not take the mirror down.
@@ -140,9 +147,18 @@ async function pollPermissions() {
     pending = next;
     pendingAt = Date.now();
     if (before !== after) {
-      // Surface as a normal mirror event so every attached browser updates at
-      // once, rather than each polling independently.
-      eventLog.append({
+      // EPHEMERAL, and deliberately never logged.
+      //
+      // This used to call eventLog.append(), which was wrong twice over: the
+      // appended event was never broadcast (nothing subscribes the log to
+      // broadcast, so the "everyone updates at once" it claimed never
+      // happened), and worse, it PERSISTED a snapshot of live state. On
+      // reconnect the client replayed it and rendered cards for requests
+      // resolved hours earlier — exactly Bastion's requirement #4, violated by
+      // the transport rather than the UI.
+      //
+      // A pending list is state, not history. The log is for conversation.
+      broadcastEphemeral({
         ts: new Date().toISOString(), room_id: cfg.room, type: 'permissions',
         from: { id: 'system', kind: 'system', display: 'permissions' },
         body: { pending: next },
@@ -151,6 +167,29 @@ async function pollPermissions() {
   } catch { /* channel down or restarting — leave the last known state */ }
 }
 setInterval(pollPermissions, 2000).unref();
+
+// --- outbox: files the instance is offering to the human ---------------------
+// The instance writes a file into outbox/; that write IS the intent to publish.
+// Polled rather than fs.watch()'d for the same reason permissions are: watch
+// semantics vary by platform and filesystem, and a missed event here is a file
+// the human never learns exists.
+function pollOutbox() {
+  for (const f of files.scanOutbox()) {
+    const stored = eventLog.append({
+      ts: new Date().toISOString(), room_id: cfg.room, type: 'file',
+      from: { id: cfg.instance, kind: 'instance', display: cfg.display },
+      body: {
+        direction: 'out', name: f.name, bytes: f.bytes, inline: f.inline,
+        url: `${cfg.basePath}/file/outbox/${encodeURIComponent(f.name)}`,
+      },
+    });
+    stats.events++;
+    stats.lastEventAt = Date.now();
+    broadcast(stored);
+    log(`outbox -> ${f.name} (${f.bytes} bytes)`);
+  }
+}
+setInterval(pollOutbox, 2000).unref();
 
 // --- SSE ---------------------------------------------------------------------
 /** @type {Set<{res: import('node:http').ServerResponse, queued: number}>} */
@@ -183,6 +222,21 @@ function broadcast(ev) {
   for (const c of clients) sseWrite(c, ev);
 }
 
+/**
+ * Push live STATE to every viewer without writing it to the log.
+ *
+ * The frame carries no `id:` line on purpose. SSE only advances a client's
+ * Last-Event-ID when a frame supplies one, so an ephemeral push cannot make a
+ * reconnecting browser skip real events it never received. That property is
+ * what lets state and history share one connection safely.
+ */
+function broadcastEphemeral(ev) {
+  const frame = `event: mirror\ndata: ${JSON.stringify({ ...ev, ephemeral: true })}\n\n`;
+  for (const c of clients) {
+    try { c.res.write(frame); } catch { clients.delete(c); }
+  }
+}
+
 setInterval(() => {
   for (const c of clients) {
     try { c.res.write(': ping\n\n'); } catch { clients.delete(c); }
@@ -197,6 +251,39 @@ function readBody(req, limit = 1024 * 1024) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', () => resolve(''));
   });
+}
+
+/**
+ * Read a request body as BYTES, REFUSING anything over the cap.
+ *
+ * readBody() above silently drops whatever exceeds its limit. That is fine for
+ * a JSON message and catastrophic for a file: the upload would report success
+ * and the human would have sent a truncated image, with no error anywhere in
+ * the system. Silent truncation is the worst available failure, so this one
+ * rejects and stops reading the moment the cap is passed.
+ */
+function readBodyBuffer(req, limit = MAX_UPLOAD_BYTES) {
+  return new Promise((resolve, reject) => {
+    let n = 0; const chunks = [];
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > limit) {
+        req.destroy();
+        reject(Object.assign(new Error('file too large'), { code: 'TOO_LARGE' }));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+/** Human-readable byte count, for log lines and chat text. */
+function humanBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 
@@ -324,6 +411,139 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(502, { 'Content-Type': 'application/json' })
          .end(JSON.stringify({ ok:false, error: err.message }));
     }
+    return;
+  }
+
+  // ---- POST /upload : a file from the browser into the instance's inbox.
+  //
+  // Raw bytes, with the name in X-Filename rather than multipart — a custom
+  // header cannot be set by a cross-origin form or <img>, so it forces a
+  // preflight that sameOrigin() then rejects. Same CSRF property /send gets
+  // from requiring application/json, without hand-parsing multipart.
+  //
+  // The file is stored AND announced twice, deliberately: as a mirror event so
+  // every viewer sees it land, and as a channel message so the instance
+  // actually knows it arrived. A file that only appears in the browser is a
+  // file the mind never learns about.
+  if (req.method === 'POST' && p === '/upload') {
+    if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+    const rawName = req.headers['x-filename'];
+    if (!rawName) {
+      res.writeHead(400, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'X-Filename header required' })); return;
+    }
+    const who = resolveIdentity(req);
+    if (!who) { res.writeHead(401, {'Content-Type':'application/json'})
+                   .end(JSON.stringify({ ok:false, error:'unauthenticated' })); return; }
+
+    // Check the declared length BEFORE reading a byte.
+    //
+    // Measured, not assumed: the streaming guard below works — it refuses the
+    // upload and stores nothing — but it destroys the socket to stop the
+    // transfer, and a destroyed socket cannot carry the 413 back. The browser
+    // saw a network error instead of "too large, the limit is 25 MB", which
+    // made a handled condition look like a broken mirror. A browser always
+    // sends Content-Length for a File body, so the common case answers cleanly
+    // here and the stream guard stays as the backstop for chunked bodies.
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
+      log(`upload REJECTED from ${senderAddress(who)}: declared ${humanBytes(declared)} > cap`);
+      res.writeHead(413, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'file too large',
+                               limit_bytes: MAX_UPLOAD_BYTES }));
+      return;
+    }
+
+    let buf;
+    try {
+      buf = await readBodyBuffer(req);
+    } catch (err) {
+      const tooBig = err.code === 'TOO_LARGE';
+      log(`upload REJECTED from ${senderAddress(who)}: ${err.message}`);
+      res.writeHead(tooBig ? 413 : 400, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error: err.message,
+                               limit_bytes: tooBig ? MAX_UPLOAD_BYTES : undefined }));
+      return;
+    }
+    if (!buf.length) {
+      res.writeHead(400, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'empty file' })); return;
+    }
+
+    let saved;
+    try { saved = files.saveInbound(buf, decodeURIComponent(String(rawName))); }
+    catch (err) {
+      log(`upload FAILED to store: ${err.message}`);
+      res.writeHead(500, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'could not store file' })); return;
+    }
+
+    const stored = eventLog.append({
+      ts: new Date().toISOString(), room_id: cfg.room, type: 'file',
+      from: { id: who.id, kind: who.kind, display: who.display },
+      body: {
+        direction: 'in', name: saved.name, bytes: saved.bytes, inline: saved.inline,
+        path: saved.path,
+        url: `${cfg.basePath}/file/inbox/${encodeURIComponent(saved.stored)}`,
+      },
+    });
+    stats.events++;
+    stats.lastEventAt = Date.now();
+    broadcast(stored);
+    log(`upload from ${senderAddress(who)}: ${saved.name} ${humanBytes(saved.bytes)} -> ${saved.stored}`);
+
+    // Ring the instance. The absolute path is the payload that matters — it is
+    // what makes the file readable with an ordinary file tool, no new verb.
+    if (cfg.channelUrl) {
+      try {
+        await fetch(cfg.channelUrl + '/direct-message', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: senderAddress(who),
+            text: `[file] sent you "${saved.name}" (${humanBytes(saved.bytes)}). `
+                + `It is on disk at: ${saved.path}`,
+            thread_id: String(cfg.threadId),
+          }),
+        });
+      } catch (err) {
+        // The file is stored and visible either way; say so rather than failing.
+        log(`upload stored but channel notify failed: ${err.message}`);
+      }
+    }
+
+    res.writeHead(200, {'Content-Type':'application/json'})
+       .end(JSON.stringify({ ok:true, name: saved.name, bytes: saved.bytes,
+                             path: saved.path, inline: saved.inline,
+                             url: `${cfg.basePath}/file/inbox/${encodeURIComponent(saved.stored)}` }));
+    return;
+  }
+
+  // ---- GET /file/<box>/<name> : serve an inbox or outbox file.
+  //
+  // Only ever from those two directories, resolved through realpath so a
+  // symlink cannot point out of them. Type comes from the extension and is
+  // sent with nosniff; anything not on the raster-image allowlist downloads
+  // rather than renders, because an HTML or SVG document served here would be
+  // same-origin with a page that can POST into a live session.
+  if (req.method === 'GET' && p.startsWith('/file/')) {
+    const [, , box, ...rest] = p.split('/');
+    const full = files.resolveServable(box, decodeURIComponent(rest.join('/')));
+    if (!full) { res.writeHead(404).end('no such file'); return; }
+    const base = path.basename(full);
+    let size = 0;
+    try { size = fs.statSync(full).size; } catch { res.writeHead(404).end('no such file'); return; }
+    res.writeHead(200, {
+      'Content-Type': files.contentType(base),
+      'Content-Length': size,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition':
+        `${isInlineImage(base) ? 'inline' : 'attachment'}; filename="${base.replace(/["\\]/g, '')}"`,
+      'Cache-Control': 'private, max-age=300',
+    });
+    // Streamed: a 25 MB readFileSync would block the loop that is watching a mind.
+    const stream = fs.createReadStream(full);
+    stream.on('error', () => { try { res.destroy(); } catch { /* gone */ } });
+    stream.pipe(res);
     return;
   }
 
