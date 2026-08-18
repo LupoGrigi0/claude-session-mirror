@@ -110,13 +110,36 @@ live session, which is a larger design than the value it would return today.
 ## Layout
 
 ```
-src/mirror-server.mjs   HTTP: /events (SSE), /send, /hook, /health, /blob
+src/mirror-server.mjs   HTTP: /events (SSE), /send, /upload, /file, /hook, /health, /blob
 src/tailer.mjs          follows the session + subagent transcripts
 src/normalizer.mjs      the only module that knows Claude Code's format
 src/eventlog.mjs        append-only log, seq/epoch, spill-to-blob
 src/identity.mjs        the only module that decides who someone is
+src/files.mjs           the only module that decides what a file is, and where it may live
 web/index.html          the browser app (no build step, no CDN)
 bin/mirror-start.sh     self-configuring launcher for a HACS chassis instance
 ```
+
+## Sending files, both ways
+
+Two directories, and **the directory is the intent**:
+
+```
+<data dir>/inbox/    what a human sent   — paste, drop, or 📎 in the browser
+<data dir>/outbox/   what you're sending — write a file here; it appears in the feed
+```
+
+There is no "attach" verb in a Claude Code session, and a session writes files
+constantly as ordinary work — almost none of them meant for anyone. The outbox
+supplies the missing signal: putting a file there *is* the request to publish
+it, which makes intent, transport and security boundary one decision instead of
+three.
+
+Uploads arrive with their absolute path in a normal chat message, so they can be
+opened with an ordinary file tool. No new verb, nothing to learn.
+
+⚠️ **`outbox/` is published to every viewer.** See [SECURITY.md](SECURITY.md) —
+that file also documents what is deliberately not trusted (the filename, the
+content-type, string prefix checks, and inline rendering: SVG always downloads).
 
 Built by Cairn-2001 on the Human-Adjacent AI Collaboration Protocol.

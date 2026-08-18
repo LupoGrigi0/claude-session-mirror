@@ -81,6 +81,49 @@ boundary.
 Anyone who can POST there can say anything to that session, as the stub
 identity, and the session will act on it.
 
+## Files
+
+Two directories under the mirror's data dir, and nothing else is ever served:
+
+| | written by | read by | reachable at |
+|---|---|---|---|
+| `inbox/` | the mirror, from `POST /upload` | the instance | `GET /file/inbox/<name>` |
+| `outbox/` | the instance | anyone who can reach the mirror | `GET /file/outbox/<name>` |
+
+**`outbox/` is published.** Anything placed there is downloadable by every
+viewer, with no further confirmation — that is the point of it, and it is worth
+saying plainly because it means an instance can disclose a file by writing to a
+path. Treat it as the publish button it is.
+
+`POST /upload` **writes to disk as the instance.** It is same-origin checked,
+requires identity, and requires an `X-Filename` header — a custom header cannot
+be set by a cross-origin form or `<img>`, so the request must preflight and the
+origin check then rejects it. That is the same CSRF property `/send` gets from
+requiring JSON, and it carries the same residual gap: **a local process can send
+anything.** Loopback is not a boundary.
+
+What is deliberately not trusted, all decided in `src/files.mjs`:
+
+- **the supplied filename** — reduced to `[A-Za-z0-9._-]`, split on both path
+  separators, `..` collapsed. Names are constructed from safe characters rather
+  than sanitised, so there is no input that escapes the directory.
+- **the supplied content-type** — the served type comes from the extension, from
+  an allowlist, with `X-Content-Type-Options: nosniff`.
+- **string prefix checks** — a symlink inside a box satisfies `startsWith(dir)`
+  while pointing at `~/.ssh`. Paths are resolved with `realpath` and must land
+  inside the resolved box.
+- **inline rendering** — only raster images render in the page.
+  **SVG always downloads**: it is an XML document that can carry `<script>`, and
+  it would be served same-origin with a page that can POST into a live session.
+
+Uploads are capped (`MIRROR_MAX_UPLOAD`, default 25 MB) and an oversized upload
+is **refused with 413, never truncated** — a silently shortened file that
+reports success is a worse outcome than a rejection.
+
+Verified against a running server rather than by reading the code: byte-exact
+round trip, five traversal shapes all refused, oversize refused, SVG served as
+`application/octet-stream; attachment`.
+
 ## Reporting
 
 Open an issue. If it is sensitive, say so and leave out the details until we can
