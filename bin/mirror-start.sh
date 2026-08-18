@@ -28,13 +28,32 @@ MIRROR_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IDENTITY="${HACS_IDENTITY_FILE:-$HOME/.hacs-identity}"
 WITH_INPUT=0
 PERMS_ONLY=0
+WITH_INTERRUPT=0
 for arg in "$@"; do
   case "$arg" in
     --with-input)       WITH_INPUT=1 ;;
     --permissions-only) PERMS_ONLY=1 ;;
+    --with-interrupt)   WITH_INTERRUPT=1 ;;
     *) echo "error: unknown option $arg" >&2; exit 1 ;;
   esac
 done
+
+# REFUSE the contradictory combination rather than resolving it.
+#
+# Found by Bastion reviewing this as an adversary: the arg loop accepted both,
+# and the --with-input export ran afterwards and unconditionally, so
+# `--permissions-only --with-input` produced permissions mode WITH message
+# injection into a root session — the exact outcome the decoupling exists to
+# prevent. The guard was real; the arg parser walked around it.
+#
+# An operator who typed both flags does not have a coherent request, so this
+# does not pick a winner. It stops.
+if [[ $PERMS_ONLY -eq 1 && $WITH_INPUT -eq 1 ]]; then
+  echo "error: --permissions-only and --with-input contradict each other." >&2
+  echo "       --permissions-only publishes nothing and accepts no messages;" >&2
+  echo "       --with-input injects into your live session. Pick one." >&2
+  exit 1
+fi
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -93,9 +112,10 @@ if [[ $PERMS_ONLY -eq 1 ]]; then
   export MIRROR_MODE=permissions
   export MIRROR_CHANNEL_URL="http://127.0.0.1:${CHANNEL_PORT}"
   export MIRROR_STUB_IDENTITY="${MIRROR_STUB_IDENTITY:-lupo|Lupo}"
-  # Approvals need the channel URL; that must not also grant message injection.
-  # Explicit here so the default is visible rather than inferred.
-  export MIRROR_ALLOW_SEND="${MIRROR_ALLOW_SEND:-0}"
+  # SET, never defaulted from the environment. `${MIRROR_ALLOW_SEND:-0}` would
+  # inherit a value an operator happened to export in their shell, so "defaults
+  # off in this mode" would only be true when unset. It is now unconditional.
+  export MIRROR_ALLOW_SEND=0
 else
   export MIRROR_TRANSCRIPT="$TRANSCRIPT"
 fi
@@ -109,12 +129,24 @@ if [[ $WITH_INPUT -eq 1 ]]; then
   echo "!! identity is a STUB (${MIRROR_STUB_IDENTITY%%|*}); it trusts the network boundary."
 fi
 
+# Interrupt is a WRITE into a live session — console access, one fixed keystroke.
+# It used to be enabled by merely knowing the tmux session name, which meant
+# permissions mode refused message injection while still offering ESC to a root
+# session. Both are writes; both now need a grant. Explicit opt-in here.
+if [[ $WITH_INTERRUPT -eq 1 ]]; then
+  export MIRROR_ALLOW_INTERRUPT=1
+  echo "!! interrupt ENABLED — the browser can send ESC to your live session."
+elif [[ $PERMS_ONLY -eq 1 ]]; then
+  export MIRROR_ALLOW_INTERRUPT=0
+fi
+
 cat <<EOF
 instance   : $INSTANCE
 mode       : $([[ $PERMS_ONLY -eq 1 ]] && echo "permissions-only — NOTHING about this session is published" || echo "full — this publishes your whole session")
 transcript : ${TRANSCRIPT:-none (not read in permissions mode)}
 url        : http://${BIND}:${PORT}${MIRROR_BASE_PATH}
 input      : $([[ ${MIRROR_ALLOW_SEND:-0} == 1 ]] && echo "on (channel $CHANNEL_PORT)" || echo "off")
+interrupt  : $([[ $WITH_INTERRUPT -eq 1 ]] && echo "on" || { [[ $PERMS_ONLY -eq 1 ]] && echo "off (pass --with-interrupt to enable)" || echo "on (full mode default)"; })
 EOF
 
 exec node "$MIRROR_HOME/src/mirror-server.mjs"

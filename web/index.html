@@ -1063,7 +1063,12 @@ setInterval(async () => {
     // Offer Stop only when the session looks busy — a turn is in flight if
     // something happened in the last ~45s. Always available if input is on and
     // we simply can't tell.
-    renderPermissions(h.pending_permissions);
+    // Permission DETAIL no longer comes from /health — it carries only a count
+    // now, because serving the pending list unauthenticated here re-opened on
+    // this port the privilege-escalation hole Bastion's uid gate closes on the
+    // channel port. Cards arrive over /events: pushed on change, on connect, and
+    // re-asserted every 15s. Calling renderPermissions(h.pending_permissions)
+    // here would now pass undefined and clear a live request off the screen.
     const busy = h.last_event_age_s !== null && h.last_event_age_s < 45;
     stopBtn.classList.toggle('show', Boolean(h.write_path?.interrupt) && busy);
     const age = h.last_event_age_s;

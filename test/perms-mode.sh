@@ -105,6 +105,42 @@ echo "6. the log file itself stays clean"
 ok "$([ "$(wc -l < "$DIR/data/permtest.jsonl")" = "3" ] && echo 1 || echo 0)" "nothing new was appended to the event log"
 
 echo
+echo "7. Bastion's findings — the flag combination is refused (F1)"
+OUT=$(HACS_IDENTITY_FILE=/nonexistent bash "$SRC/bin/mirror-start.sh" --permissions-only --with-input 2>&1)
+RC=$?
+ok "$([ "$RC" != "0" ] && echo 1 || echo 0)" "--permissions-only --with-input exits non-zero ($RC)"
+ok "$(echo "$OUT" | grep -qi 'contradict' && echo 1 || echo 0)" "and says why, before touching identity"
+
+echo
+echo "8. /health leaks a count, never the list (F2)"
+ok "$(echo "$H" | grep -q '"pending_permissions_count"' && echo 1 || echo 0)" "health reports pending_permissions_count"
+ok "$(echo "$H" | grep -q '"pending_permissions"' && echo 0 || echo 1)" "health does NOT contain the pending list"
+ok "$(echo "$H" | grep -q 'systemctl restart nginx' && echo 0 || echo 1)" "the literal command is absent from /health"
+ok "$(echo "$H" | grep -q 'REQ-9' && echo 0 || echo 1)" "the request_id is absent from /health"
+ok "$(grep -q 'systemctl restart nginx' "$DIR/sse" && echo 1 || echo 0)" "but the panel still gets it over /events"
+
+echo
+echo "9. a NEWLY attached viewer is handed current state (F2 follow-on)"
+curl -sN --max-time 3 "http://127.0.0.1:$PORT/events" > "$DIR/sse2"
+ok "$(grep -q 'REQ-9' "$DIR/sse2" && echo 1 || echo 0)" "fresh connection receives the pending request immediately"
+ok "$(grep -q '^id:' "$DIR/sse2" && echo 0 || echo 1)" "still with no id: frame"
+
+echo
+echo "10. interrupt needs its own grant (F3)"
+ok "$(echo "$H" | grep -q '"interrupt": false' && echo 1 || echo 0)" "health reports interrupt disabled in permissions mode"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/interrupt" -H 'Content-Type: application/json' --data '{}')
+ok "$([ "$CODE" = "403" ] && echo 1 || echo 0)" "POST /interrupt -> $CODE (refused, not console access to root)"
+
+echo
+echo "11. the mode is sticky in the data dir (F4)"
+ok "$([ -f "$DIR/data/.permissions-only" ] && echo 1 || echo 0)" "marker written on first permissions start"
+FULLOUT=$(MIRROR_INSTANCE=permtest MIRROR_TRANSCRIPT="$DIR/session.jsonl"   MIRROR_DATA_DIR="$DIR/data" MIRROR_BIND=127.0.0.1 MIRROR_PORT=22096   node "$SRC/src/mirror-server.mjs" 2>&1)
+FRC=$?
+ok "$([ "$FRC" != "0" ] && echo 1 || echo 0)" "a FULL-mode start against that dir refuses to boot ($FRC)"
+ok "$(echo "$FULLOUT" | grep -qi 'refusing to start' && echo 1 || echo 0)" "and says so loudly"
+ok "$(echo "$FULLOUT" | grep -q 'rm ' && echo 1 || echo 0)" "and states how to clear it deliberately"
+
+echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ] || { echo; echo "--- log ---"; cat "$DIR/log"; }
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

@@ -76,6 +76,15 @@ cfg.allowSend = process.env.MIRROR_ALLOW_SEND === '1' ? true
               : process.env.MIRROR_ALLOW_SEND === '0' ? false
               : cfg.mode === 'full' && Boolean(cfg.channelUrl);
 
+// Interrupt is also a WRITE — console access to a live session, one fixed key.
+// It used to be enabled by merely knowing the tmux session name, so permissions
+// mode refused message injection while still offering ESC to a ROOT session.
+// Bastion caught that asymmetry: both are writes, so both need a grant. Full
+// mode keeps its previous behaviour; permissions mode requires an explicit yes.
+cfg.allowInterrupt = process.env.MIRROR_ALLOW_INTERRUPT === '1' ? true
+                   : process.env.MIRROR_ALLOW_INTERRUPT === '0' ? false
+                   : cfg.mode === 'full' && Boolean(cfg.tmuxSession);
+
 /** Strip the base path; returns null when the request isn't ours. */
 function route(pathname) {
   if (!cfg.basePath) return pathname;
@@ -93,6 +102,32 @@ if (cfg.mode === 'permissions' && !cfg.channelUrl) {
   process.exit(1);
 }
 fs.mkdirSync(cfg.dataDir, { recursive: true });
+
+// --- mode stickiness ---------------------------------------------------------
+// The failure worth preventing: MIRROR_MODE unset on some later restart, and a
+// root session silently becomes a full mirror publishing every command it runs.
+// A startup banner is not a control — nobody reads it on the restart that
+// matters, which is always the unattended one.
+//
+// So the DEPLOYMENT remembers instead of the operator. Once a data dir has been
+// used in permissions mode it is marked, and a full-mode start against that dir
+// REFUSES TO BOOT. The failure direction flips from silently-publishes-root to
+// loudly-refuses-to-start. Bastion's suggestion, and better than anything I had.
+const modeMarker = path.join(cfg.dataDir, '.permissions-only');
+const markedPermissions = fs.existsSync(modeMarker);
+if (markedPermissions && cfg.mode !== 'permissions') {
+  console.error(
+    `refusing to start: ${cfg.dataDir} is marked permissions-only, but MIRROR_MODE is "${cfg.mode}".\n` +
+    `  This data dir belongs to a session that chose not to be published.\n` +
+    `  Starting in full mode would publish its transcript.\n\n` +
+    `  If that is genuinely intended, clear the marker deliberately:\n` +
+    `      rm ${modeMarker}`);
+  process.exit(1);
+}
+if (cfg.mode === 'permissions' && !markedPermissions) {
+  try { fs.writeFileSync(modeMarker, `marked ${new Date().toISOString()}\n`); }
+  catch (err) { console.error(`could not write mode marker: ${err.message}`); process.exit(1); }
+}
 
 const log = (m) => console.log(`[mirror] ${new Date().toISOString()} ${m}`);
 const eventLog = new EventLog(cfg.dataDir, cfg.instance);
@@ -159,6 +194,7 @@ const tailer = cfg.mode !== 'full' ? null : new TranscriptTailer({
 // outlive the session that created it (Bastion).
 let pending = [];
 let pendingAt = 0;
+let lastAssert = 0;
 
 async function pollPermissions() {
   if (!cfg.channelUrl) return;
@@ -172,7 +208,13 @@ async function pollPermissions() {
     const after  = next.map(x => x.request_id).join(',');
     pending = next;
     pendingAt = Date.now();
-    if (before !== after) {
+    // Re-assert periodically even when unchanged. /health no longer carries the
+    // list, so this stream is the only source of detail — and Bastion's rule
+    // that "the poll is the only truth and it always wins" has to survive a
+    // viewer that missed a push, not just one that was watching at the time.
+    const stale = Date.now() - lastAssert > 15000;
+    if (before !== after || stale) {
+      lastAssert = Date.now();
       // EPHEMERAL, and deliberately never logged.
       //
       // This used to call eventLog.append(), which was wrong twice over: the
@@ -184,11 +226,7 @@ async function pollPermissions() {
       // the transport rather than the UI.
       //
       // A pending list is state, not history. The log is for conversation.
-      broadcastEphemeral({
-        ts: new Date().toISOString(), room_id: cfg.room, type: 'permissions',
-        from: { id: 'system', kind: 'system', display: 'permissions' },
-        body: { pending: next },
-      });
+      broadcastEphemeral(permissionsEvent());
     }
   } catch { /* channel down or restarting — leave the last known state */ }
 }
@@ -256,11 +294,24 @@ function broadcast(ev) {
  * reconnecting browser skip real events it never received. That property is
  * what lets state and history share one connection safely.
  */
+function ephemeralFrame(ev) {
+  return `event: mirror\ndata: ${JSON.stringify({ ...ev, ephemeral: true })}\n\n`;
+}
+
 function broadcastEphemeral(ev) {
-  const frame = `event: mirror\ndata: ${JSON.stringify({ ...ev, ephemeral: true })}\n\n`;
+  const frame = ephemeralFrame(ev);
   for (const c of clients) {
     try { c.res.write(frame); } catch { clients.delete(c); }
   }
+}
+
+/** The current pending-permission state, as an ephemeral event. */
+function permissionsEvent() {
+  return {
+    ts: new Date().toISOString(), room_id: cfg.room, type: 'permissions',
+    from: { id: 'system', kind: 'system', display: 'permissions' },
+    body: { pending },
+  };
 }
 
 setInterval(() => {
@@ -621,6 +672,10 @@ const server = http.createServer(async (req, res) => {
     }
     const who = resolveIdentity(req);
     if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!cfg.allowInterrupt) {
+      res.writeHead(403, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'interrupt is not enabled on this mirror' })); return;
+    }
     if (!cfg.tmuxSession) {
       res.writeHead(503, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error:'no tmux session configured' })); return;
@@ -725,7 +780,22 @@ const server = http.createServer(async (req, res) => {
       // liveness from last_event_age_s.
       last_event_age_s: lastAge,
       counters: { ...stats },
-      pending_permissions: pending,
+      // A COUNT, never the list.
+      //
+      // Bastion's H-04 patch gates GET /pending-permissions on the CHANNEL
+      // server behind kernel-verified peer uid, because an unauthenticated read
+      // of pending request_ids plus a verdict POST is a privilege-escalation
+      // chain against a root session. This endpoint held the same data on a
+      // different port and served it unauthenticated — re-opening on 22004 the
+      // hole his patch closes on 21004.
+      //
+      // Each component was defensible alone; together they were a bypass.
+      // Neither of us could see it from inside our own review.
+      //
+      // Detail now travels only over /events, which is already the payload path
+      // and is pushed to attached viewers. /health stays a liveness probe, which
+      // is what an unauthenticated caller legitimately wants from it.
+      pending_permissions_count: pending.length,
       pending_age_s: pendingAt ? Math.round((Date.now() - pendingAt)/1000) : null,
       // Published so the UI states the real limit rather than a hardcoded one
       // that drifts out of agreement with the server.
@@ -742,7 +812,7 @@ const server = http.createServer(async (req, res) => {
       write_path: {
         channel_url: cfg.channelUrl || null,
         send: cfg.allowSend,
-        interrupt: Boolean(cfg.tmuxSession),
+        interrupt: cfg.allowInterrupt,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
       },
@@ -790,6 +860,11 @@ const server = http.createServer(async (req, res) => {
     for (const ev of backlog) sseWrite(client, ev);
     clients.add(client);
     stats.clients = clients.size;
+    // Hand the new viewer the current pending state at once. /health no longer
+    // carries the list, and ephemeral frames are never replayed, so without this
+    // a freshly opened tab would show no cards until the next change — which,
+    // for a session blocked on approval, could be forever.
+    if (pending.length) { try { client.res.write(ephemeralFrame(permissionsEvent())); } catch { /* gone */ } }
     log(`client attached (from seq ${afterSeq}); ${clients.size} total`);
 
     req.on('close', () => { clients.delete(client); stats.clients = clients.size; });
