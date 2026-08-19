@@ -78,6 +78,36 @@ is not a preference — it was measured:
   and in a real 890-line transcript 10 of 14 entry types were not conversation
   at all.
 
+## Slash commands
+
+Type `/context` in the browser and it reaches the **chassis**, not the model.
+A free-text box, not a maintained menu — the server owns the allowlist and its
+refusal names what is permitted, so there is no list to keep in sync.
+
+```
+./bin/mirror-start.sh --with-commands
+```
+
+Off unless asked for, in every mode. What makes it not a remote shell:
+
+- the name must be **on an allowlist**, not merely absent from a denylist
+- args are stripped of newlines and control characters — **a newline is an Enter
+  press**, and without that one "argument" could submit further lines
+- `send-keys -l` sends the text literally, so nothing is read as a key name
+- everything sent begins with `/`, so a stray send into a dead pane is inert:
+  a shell reads `/context` as a path and fails to find it
+
+**The omissions are the design.** Interactive commands (`config`, `model`,
+`agents`, `mcp`…) are excluded because, fired blind from a browser, they strand
+the pane inside a modal the viewer cannot see or dismiss — worse than not having
+the feature. Destructive ones (`clear`, `exit`) are excluded because a mis-tap on
+a phone should not be able to end a mind's context. Override with
+`MIRROR_COMMAND_ALLOW` if you disagree; it is your session.
+
+Command invocations and their output are rendered as command chips. Claude Code
+records both halves as `user`-role entries, so without that they appear as the
+human typing raw XML at themselves — the fourth distinct thing that role carries.
+
 ## Known issue: two writers
 
 A session can be driven from the browser **and** from `tmux attach` at the same

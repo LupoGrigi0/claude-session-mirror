@@ -121,6 +121,46 @@ export function detectSystemInjection(raw) {
   return null;
 }
 
+/**
+ * A slash command, which Claude Code records as TWO separate `user` entries:
+ * the invocation, then its output.
+ *
+ *   <command-name>/plan</command-name><command-message>…</command-message>
+ *   <command-args></command-args>
+ *   <local-command-stdout>Enabled plan mode</local-command-stdout>
+ *
+ * Both carry role `user`, so without this the mirror shows Lupo apparently
+ * typing raw XML at himself. That is the FOURTH distinct thing Claude Code
+ * routes through the user role — after tool results, agent completions and
+ * system reminders. The role is a transport, and every new inbound kind has to
+ * be checked rather than assumed.
+ *
+ * @returns {{kind:'invocation', name:string, args:string}|{kind:'output', text:string}|null}
+ */
+export function detectSlashCommand(raw) {
+  const t = String(raw ?? '');
+  const name = /<command-name>([\s\S]*?)<\/command-name>/.exec(t)?.[1]?.trim();
+  if (name) {
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(t)?.[1]?.trim() || '';
+    return { kind: 'invocation', name: name.replace(/^\/+/, ''), args };
+  }
+  const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(t);
+  if (out) return { kind: 'output', text: out[1].trim() };
+  return null;
+}
+
+/** One shape for both halves of a slash command, so the UI can pair them. */
+function commandEvent(base, from, cmd, index) {
+  return {
+    ...base, ...(index === undefined ? {} : { index }),
+    type: 'command',
+    from: { id: 'chassis', kind: 'system', display: 'command' },
+    body: cmd.kind === 'invocation'
+      ? { name: cmd.name, args: cmd.args, invocation: true, by: from.display }
+      : { output: cmd.text },
+  };
+}
+
 export function normalizeEntry(entry, ctx = {}) {
   const type = entry?.type;
   if (!CONVERSATIONAL.has(type)) return [];
@@ -151,6 +191,8 @@ export function normalizeEntry(entry, ctx = {}) {
   // A bare-string user message (the common shape for typed input).
   if (typeof content === 'string') {
     if (content.trim()) {
+      const cmd = detectSlashCommand(content);
+      if (cmd) { events.push(commandEvent(base, from, cmd)); return events; }
       const un = unwrapChannelEnvelope(content);
       const speaker = un.from
         ? { id: un.from, kind: 'human', display: un.from.split('@')[0], channel: un.from.split('@')[1] || 'channel' }
@@ -170,6 +212,8 @@ export function normalizeEntry(entry, ctx = {}) {
     if (bt === 'text') {
       if (!block.text?.trim()) return;
       if (type === 'user') {
+        const cmd = detectSlashCommand(block.text);
+        if (cmd) { events.push(commandEvent(base, from, cmd, index)); return; }
         const un = unwrapChannelEnvelope(block.text);
         const sys = detectSystemInjection(un.text || block.text);
         if (sys) {

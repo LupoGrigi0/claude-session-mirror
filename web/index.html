@@ -244,6 +244,18 @@
            border-radius:8px;font:12px var(--mono)}
   #earlier:hover{color:var(--fg);border-color:var(--cairn)}
   #earlier.show{display:block}
+  /* slash commands: a chassis action, not a speaker. Rendered as a chip so it
+     can never be mistaken for Lupo typing XML at himself — which is exactly
+     what it looked like before the normalizer learned to recognise them. */
+  .cmd{font:12px var(--mono);color:var(--tool);background:var(--raised);
+       border:1px solid var(--line);border-left:3px solid var(--tool);
+       border-radius:8px;padding:7px 11px;display:flex;align-items:baseline;gap:6px}
+  .cmd .slash{color:var(--faint)}
+  .cmd .cname{font-weight:700;letter-spacing:.3px}
+  .cmd .cargs{color:var(--dim);overflow-wrap:anywhere}
+  .cmd .cby{margin-left:auto;color:var(--faint);font-size:10px;flex:none}
+  .cmd.out{display:block;padding:0;border-left-color:var(--line);background:none;border:0}
+  .cmd.out pre{border:1px solid var(--line);border-radius:8px;margin:0}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
   .empty.permsonly{font-style:normal;max-width:520px;margin:0 auto;text-align:left;
                    line-height:1.65;color:var(--dim);border:1px solid var(--line);
@@ -575,6 +587,22 @@ function render(ev, quiet){
     const d = document.createElement('div');
     d.className = 'divider ev';
     d.textContent = `agent · ${ev.body?.label || ev.agent_id || ''}`;
+    add(d); return;
+  }
+
+  if (ev.type === 'command'){
+    const b = ev.body || {};
+    const d = document.createElement('div');
+    d.className = 'cmd ev' + (b.invocation ? '' : ' out');
+    if (b.invocation){
+      d.innerHTML = `<span class="slash">/</span><span class="cname">${esc(b.name)}</span>`
+                  + (b.args ? ` <span class="cargs">${esc(b.args)}</span>` : '')
+                  + `<span class="cby">${esc(b.by || '')}</span>`;
+    } else {
+      const pre = document.createElement('pre');
+      pre.textContent = b.output || '';
+      d.appendChild(pre);
+    }
     add(d); return;
   }
 
@@ -915,6 +943,10 @@ function cancelPending(){
 function queueSend(){
   const text = input.value.trim();
   if (!text) return;
+  // A leading slash addresses the CHASSIS, not the mind. Lupo asked for this as
+  // a free-text box rather than a maintained menu, so there is no list to keep
+  // in sync — the server owns the allowlist and says what it refused.
+  if (/^\/[a-zA-Z]/.test(text)){ runCommand(text); return; }
   // A second Send while one is queued means "and also this" — flush the first
   // immediately so the session receives them in the order they were written.
   if (pending) flushPending();
@@ -936,6 +968,37 @@ function flushPending(){
 }
 
 expediteBtn.addEventListener('click', flushPending);
+
+/** Send a slash command to the chassis. No recall window: it is not a message. */
+async function runCommand(raw){
+  const m = /^\/([a-zA-Z][\w:-]*)\s*([\s\S]*)$/.exec(raw);
+  if (!m){ sendStat.textContent = 'not a command'; return; }
+  const [, name, args] = m;
+  input.value = ''; localStorage.removeItem(DRAFT); resize(); refresh();
+  sendStat.textContent = `running /${name}\u2026`;
+  try{
+    const r = await fetch(BASE + '/command', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, args })
+    });
+    const d = await r.json().catch(()=>({}));
+    if (r.ok && d.ok){
+      // Output arrives through the stream like everything else — the chassis
+      // records it in the transcript, so we derive rather than report.
+      sendStat.textContent = `sent ${d.sent}`;
+      setTimeout(()=>{ if(!pending) sendStat.textContent=''; }, 3000);
+    } else if (d.allowed){
+      input.value = raw; resize(); refresh();
+      sendStat.textContent = `/${name} not allowed \u2014 try: ${d.allowed.map(c=>'/'+c).join(' ')}`;
+    } else {
+      input.value = raw; resize(); refresh();
+      sendStat.textContent = `/${name} failed: ${d.error || r.status}`;
+    }
+  } catch(err){
+    input.value = raw; resize(); refresh();
+    sendStat.textContent = `/${name} failed: ${err.message}`;
+  }
+}
 
 // A queued message must not die with the tab. keepalive lets the request outlive
 // the page; without it, closing a tab mid-window would silently eat the message.

@@ -8,6 +8,7 @@
 #   ./bin/mirror-start.sh                    # read-only mirror
 #   ./bin/mirror-start.sh --with-input       # also accept messages from the browser
 #   ./bin/mirror-start.sh --permissions-only # publish NOTHING; approvals panel only
+#   ./bin/mirror-start.sh --with-commands   # allow /context, /compact ... from the browser
 #   ./bin/mirror-start.sh --permissions-only --with-input
 #                                            # approvals + conversation, still no
 #                                            # transcript. What a root session wants.
@@ -32,11 +33,13 @@ IDENTITY="${HACS_IDENTITY_FILE:-$HOME/.hacs-identity}"
 WITH_INPUT=0
 PERMS_ONLY=0
 WITH_INTERRUPT=0
+WITH_COMMANDS=0
 for arg in "$@"; do
   case "$arg" in
     --with-input)       WITH_INPUT=1 ;;
     --permissions-only) PERMS_ONLY=1 ;;
     --with-interrupt)   WITH_INTERRUPT=1 ;;
+    --with-commands)    WITH_COMMANDS=1 ;;
     *) echo "error: unknown option $arg" >&2; exit 1 ;;
   esac
 done
@@ -190,6 +193,9 @@ export MIRROR_ROOM="${MIRROR_ROOM:-$INSTANCE}"
 # never inherited from the caller's environment.
 ALLOW_SEND=$WITH_INPUT
 ALLOW_INTERRUPT=$WITH_INTERRUPT
+# Slash commands type into the pane. Own grant, off unless asked for, in every
+# mode — never inherited from --with-input or from the environment.
+ALLOW_COMMANDS=$WITH_COMMANDS
 # Full mode keeps its historical default: interrupt available when there is a
 # tmux session to interrupt. Permissions mode grants nothing it wasn't asked for.
 if [[ $PERMS_ONLY -eq 0 && $WITH_INTERRUPT -eq 0 ]]; then ALLOW_INTERRUPT=1; fi
@@ -211,6 +217,7 @@ fi
 
 export MIRROR_ALLOW_SEND="$ALLOW_SEND"
 export MIRROR_ALLOW_INTERRUPT="$ALLOW_INTERRUPT"
+export MIRROR_ALLOW_COMMANDS="$ALLOW_COMMANDS"
 
 if [[ $ALLOW_SEND -eq 1 ]]; then
   echo "!! input ENABLED — the browser can inject messages into your live session."
@@ -227,7 +234,8 @@ transcript : ${TRANSCRIPT:-none (not read in permissions mode)}${AGE_S:+  (last 
   chosen by: $SID_SRC}
 url        : http://${BIND}:${PORT}${MIRROR_BASE_PATH}
 input      : $([[ ${MIRROR_ALLOW_SEND:-0} == 1 ]] && echo "on (channel $CHANNEL_PORT)" || echo "off")
-interrupt  : $([[ $WITH_INTERRUPT -eq 1 ]] && echo "on" || { [[ $PERMS_ONLY -eq 1 ]] && echo "off (pass --with-interrupt to enable)" || echo "on (full mode default)"; })
+interrupt  : $([[ $ALLOW_INTERRUPT -eq 1 ]] && echo "on" || echo "off (pass --with-interrupt to enable)")
+commands   : $([[ $ALLOW_COMMANDS -eq 1 ]] && echo "on (allowlisted only)" || echo "off (pass --with-commands to enable)")
 EOF
 
 exec node "$MIRROR_HOME/src/mirror-server.mjs"

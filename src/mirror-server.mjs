@@ -85,6 +85,29 @@ cfg.allowInterrupt = process.env.MIRROR_ALLOW_INTERRUPT === '1' ? true
                    : process.env.MIRROR_ALLOW_INTERRUPT === '0' ? false
                    : cfg.mode === 'full' && Boolean(cfg.tmuxSession);
 
+// Slash commands type text into a live pane, so they get their OWN grant rather
+// than riding on another. Off unless asked for, in every mode — the lesson from
+// --with-input silently arriving via flag ordering.
+cfg.allowCommands = process.env.MIRROR_ALLOW_COMMANDS === '1';
+
+/**
+ * The allowlist. Short on purpose, and the omissions are the design.
+ *
+ * IN: commands that print something and return.
+ *
+ * OUT — interactive TUI (`config`, `model`, `agents`, `mcp`, `plugin`, `login`,
+ * `theme`, `vim`…). Fired blind from a browser these leave the pane inside a
+ * modal the viewer cannot see or dismiss, stranding the session until someone
+ * reaches a terminal. Worse than not having the feature.
+ *
+ * OUT — destructive (`clear`, `exit`, `quit`). A mis-tap on a phone should not
+ * be able to end a mind's context. `compact` is in because it is a routine,
+ * recoverable operation Lupo performs deliberately.
+ */
+cfg.commandAllow = new Set(
+  (process.env.MIRROR_COMMAND_ALLOW || 'context,cost,status,help,compact,export,plan')
+    .split(',').map(s => s.trim().replace(/^\/+/, '').toLowerCase()).filter(Boolean));
+
 /** Strip the base path; returns null when the request isn't ours. */
 function route(pathname) {
   if (!cfg.basePath) return pathname;
@@ -693,6 +716,81 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+  // ---- POST /command : run an ALLOWLISTED slash command in the session.
+  //
+  // This is the one endpoint that types text into a live pane, so it is the one
+  // that most needs its limits stated rather than implied.
+  //
+  // WHAT MAKES IT NOT A REMOTE SHELL:
+  //   1. The command name must be on an allowlist. Not "not on a denylist" —
+  //      on a list. Anything unrecognised is refused by name.
+  //   2. Everything sent begins with '/', which is also why a stray send into a
+  //      dead pane is inert: a shell reads "/context" as a path and fails to
+  //      find it. That is luck turned into a property, so it is written down.
+  //   3. Args are stripped of newlines and control characters. A newline is an
+  //      Enter press — without this, one "argument" could submit further lines
+  //      into the session. That is the injection that matters here.
+  //   4. send-keys uses -l (literal), so nothing is interpreted as a key name.
+  //
+  // WHAT IS DELIBERATELY NOT ALLOWED, and why the allowlist is short:
+  // commands that open an interactive TUI (config, model, agents, mcp…) would
+  // leave the pane inside a modal the browser cannot see or dismiss — stranding
+  // the session in a state only someone at the terminal can clear. That is
+  // worse than not having the feature. Destructive ones (clear, exit) are out
+  // because a mis-tap on a phone should not be able to end a mind's context.
+  if (req.method === 'POST' && p === '/command') {
+    if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
+    if (!/^application\/json/i.test(req.headers['content-type'] || '')) {
+      res.writeHead(415).end('content-type must be application/json'); return;
+    }
+    const who = resolveIdentity(req);
+    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!cfg.allowCommands) {
+      res.writeHead(403, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'slash commands are not enabled on this mirror' }));
+      return;
+    }
+    if (!cfg.tmuxSession) {
+      res.writeHead(503, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'no tmux session configured' })); return;
+    }
+
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch { /* below */ }
+    const name = String(body.name || '').trim().replace(/^\/+/, '').toLowerCase();
+    const rawArgs = String(body.args || '');
+    // Newlines ARE Enter presses. Strip them and every other control char.
+    // Escapes, NOT literal control bytes. Typing the raw characters here put
+    // 0x00 and 0x1f into the source: it parsed fine, behaved correctly, and
+    // silently made the file BINARY to grep — every search returned nothing,
+    // including searches for unrelated code. Correct and unsearchable.
+    const args = rawArgs.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500);
+
+    if (!/^[a-z][a-z0-9:_-]*$/.test(name) || !cfg.commandAllow.has(name)) {
+      log(`command REFUSED "${name}" from ${senderAddress(who)}`);
+      res.writeHead(403, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:`"/${name}" is not allowed`,
+                               allowed: [...cfg.commandAllow].sort() }));
+      return;
+    }
+
+    const line = `/${name}${args ? ' ' + args : ''}`;
+    const done = await new Promise(resolve => {
+      // Literal text first, THEN Enter as a separate key. Sending them together
+      // would let the text be parsed as key names.
+      execFile('tmux', ['send-keys', '-t', cfg.tmuxSession, '-l', '--', line],
+        { timeout: 4000 }, (err, _o, stderr) => {
+          if (err) return resolve({ ok:false, error:(stderr || err.message).trim() });
+          execFile('tmux', ['send-keys', '-t', cfg.tmuxSession, 'Enter'],
+            { timeout: 4000 }, (e2, _o2, se2) =>
+              resolve(e2 ? { ok:false, error:(se2 || e2.message).trim() } : { ok:true, sent: line }));
+        });
+    });
+    log(`command ${line} by ${senderAddress(who)} -> ${done.ok ? 'sent' : done.error}`);
+    res.writeHead(done.ok ? 200 : 502, {'Content-Type':'application/json'}).end(JSON.stringify(done));
+    return;
+  }
+
   // ---- POST /permission : approve or deny ONE request, BY ID.
   //
   // Never by position. Bastion approved pending[0] during testing and hit a
@@ -817,6 +915,7 @@ const server = http.createServer(async (req, res) => {
         channel_url: cfg.channelUrl || null,
         send: cfg.allowSend,
         interrupt: cfg.allowInterrupt,
+        commands: cfg.allowCommands ? [...cfg.commandAllow].sort() : false,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
       },
