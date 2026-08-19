@@ -256,6 +256,22 @@
   .cmd .cby{margin-left:auto;color:var(--faint);font-size:10px;flex:none}
   .cmd.out{display:block;padding:0;border-left-color:var(--line);background:none;border:0}
   .cmd.out pre{border:1px solid var(--line);border-radius:8px;margin:0}
+  /* a question the session is asking — the options are DATA, rendered as given */
+  .qcard{border:1px solid var(--sub);border-left:3px solid var(--sub);border-radius:10px;
+         background:var(--panel);padding:12px 14px}
+  .qhead{font:10px var(--mono);color:var(--sub);letter-spacing:.6px;text-transform:uppercase}
+  .qtext{font-weight:600;margin:5px 0 9px;line-height:1.45}
+  .qopts{margin:0;padding-left:20px}
+  .qopts li{margin:7px 0}
+  .olabel{font-weight:600;color:var(--fg)}
+  .odesc{display:block;color:var(--dim);font-size:.9em;line-height:1.5}
+  .oprev{margin-top:6px;font-size:11px;max-height:160px}
+  .qblock + .qblock{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+  .qcard.answered{border-color:var(--human);border-left-color:var(--human);padding:9px 12px}
+  .qa{font:12px var(--mono);display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .qlabel{color:var(--human);font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.5px}
+  .qq{color:var(--faint);overflow-wrap:anywhere}
+  .qpick{color:var(--fg);font-weight:700}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
   .empty.permsonly{font-style:normal;max-width:520px;margin:0 auto;text-align:left;
                    line-height:1.65;color:var(--dim);border:1px solid var(--line);
@@ -587,6 +603,33 @@ function render(ev, quiet){
     const d = document.createElement('div');
     d.className = 'divider ev';
     d.textContent = `agent · ${ev.body?.label || ev.agent_id || ''}`;
+    add(d); return;
+  }
+
+  if (ev.type === 'question'){
+    const b = ev.body || {};
+    const d = document.createElement('div');
+    d.className = 'qcard ev';
+    if (Array.isArray(b.answered)){
+      d.classList.add('answered');
+      d.innerHTML = b.answered.map(a =>
+        `<div class="qa"><span class="qlabel">answered</span> `
+      + `<span class="qq">${esc(a.question)}</span> `
+      + `<span class="qpick">${esc(a.answer)}</span></div>`).join('');
+      add(d); return;
+    }
+    // Render the OFFERED options. Never a fixed set of buttons — Anthropic omits
+    // options in some cases, so the list is data, not layout.
+    d.innerHTML = (b.questions || []).map(q => `
+      <div class="qblock">
+        <div class="qhead">${esc(q.header || 'question')}${q.multiSelect ? ' · choose any' : ''}</div>
+        <div class="qtext">${esc(q.question)}</div>
+        <ol class="qopts">${(q.options || []).map(o => `
+          <li><span class="olabel">${esc(o.label)}</span>${
+            o.description ? `<span class="odesc">${esc(o.description)}</span>` : ''}${
+            o.preview ? `<pre class="oprev">${esc(o.preview)}</pre>` : ''}</li>`).join('')}
+        </ol>
+      </div>`).join('');
     add(d); return;
   }
 

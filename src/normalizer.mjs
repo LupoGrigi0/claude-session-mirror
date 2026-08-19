@@ -137,6 +137,20 @@ export function detectSystemInjection(raw) {
  *
  * @returns {{kind:'invocation', name:string, args:string}|{kind:'output', text:string}|null}
  */
+/**
+ * The answer to an AskUserQuestion, which arrives as an ordinary tool_result:
+ *   Your questions have been answered: "<question>"="<chosen label>" selected preview: …
+ * Recognising it lets the UI say what was CHOSEN instead of printing the
+ * machine sentence back at the person who chose it.
+ */
+export function detectQuestionAnswer(raw) {
+  const t = String(raw ?? '');
+  if (!/^Your questions have been answered:/.test(t)) return null;
+  const picks = [...t.matchAll(/"([^"]+)"="([^"]+)"/g)]
+    .map(m => ({ question: m[1], answer: m[2] }));
+  return picks.length ? { picks } : null;
+}
+
 export function detectSlashCommand(raw) {
   const t = String(raw ?? '');
   const name = /<command-name>([\s\S]*?)<\/command-name>/.exec(t)?.[1]?.trim();
@@ -246,11 +260,50 @@ export function normalizeEntry(entry, ctx = {}) {
           ? { text }
           : { redacted: true, reason: 'not persisted by Claude Code', has_signature: Boolean(block.signature) },
       });
+    } else if (bt === 'tool_use' && block.name === 'AskUserQuestion') {
+      // A QUESTION, not a tool call.
+      //
+      // AskUserQuestion is an ordinary tool, so unlike a permission prompt it is
+      // written to the transcript in full — question, header, and every option
+      // with its description. The mirror can therefore SEE questions by tailing;
+      // no side channel is involved. Rendering it as a generic tool chip shows
+      // the human a JSON blob of the decision they are being asked to make,
+      // which is the display half of the bug slopus/happy#635 hit in its
+      // response path.
+      //
+      // Emitted structured so the UI renders the OFFERED options — never a fixed
+      // set of buttons. Anthropic omits options in some cases, so the option
+      // list is data, not layout.
+      const qs = Array.isArray(block.input?.questions) ? block.input.questions : [];
+      events.push({ ...base, from, index, type: 'question',
+        body: { tool_use_id: block.id || null,
+                questions: qs.map(q => ({
+                  question: String(q?.question || ''),
+                  header: String(q?.header || ''),
+                  multiSelect: Boolean(q?.multiSelect),
+                  options: (Array.isArray(q?.options) ? q.options : []).map(o => ({
+                    label: String(o?.label || ''),
+                    description: String(o?.description || ''),
+                    preview: typeof o?.preview === 'string' ? o.preview : null,
+                  })),
+                })) } });
     } else if (bt === 'tool_use') {
       events.push({
         ...base, from, index, type: 'tool_use',
         body: { tool: block.name, tool_use_id: block.id, input: block.input ?? {} },
       });
+    } else if (bt === 'tool_result' && detectQuestionAnswer(
+                 typeof block.content === 'string' ? block.content
+                   : Array.isArray(block.content)
+                     ? block.content.map(x => (x && x.type === 'text') ? x.text : '').join('')
+                     : '')) {
+      const raw = typeof block.content === 'string' ? block.content
+                : block.content.map(x => (x && x.type === 'text') ? x.text : '').join('');
+      events.push({ ...base, index, type: 'question',
+        from: { id: ctx.speaker?.id || 'user', kind: ctx.speaker?.kind || 'human',
+                display: ctx.speaker?.display || 'User' },
+        body: { tool_use_id: block.tool_use_id || null,
+                answered: detectQuestionAnswer(raw).picks } });
     } else if (bt === 'tool_result') {
       // Tool results arrive inside `user`-role entries — that is an API
       // convention (results are fed back as user turns), NOT a speaker. The
