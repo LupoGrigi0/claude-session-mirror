@@ -121,9 +121,10 @@ in the header and the browser tab. Re-read when the file changes, so you can pic
 a different mark without restarting anything — it is your file.
 
 Both fields are optional and both are constrained: the glyph is capped at two
-graphemes (cut with a grapheme-aware split, so an emoji is never sliced in half)
-and rejected if it contains markup; the colour must be `#rrggbb`. A malformed
-profile is logged and ignored, never fatal.
+**grapheme clusters** (via `Intl.Segmenter` — a ZWJ emoji like 🐦‍⬛ is one
+grapheme across three code points, and a naive `[...str]` cut leaves a dangling
+joiner) and rejected if it contains markup; the colour must be `#rrggbb`. A
+malformed profile is logged and ignored, never fatal.
 
 **The context ring is not configurable.** It is a meter, not decoration — the
 one thing a glance at a tab is actually for.

@@ -45,6 +45,30 @@ for (const [label, evil] of [
   ok(clean, `${label.padEnd(22)} -> ${JSON.stringify(out)}`);
 }
 
-console.log('\nboth findings closed, and each is now enforced where it is used');
+// --- profile glyph: cut by GRAPHEME CLUSTER, not by code point ---------------
+// Shipped wrong once and described wrong in the same breath: `[...str]` splits
+// by CODE POINT. Axiom's raven is bird + ZWJ + black square — one grapheme,
+// three code points — so a two-code-point cap left a bird with a dangling
+// joiner. Only Intl.Segmenter knows where a grapheme actually ends.
+console.log('\nPROFILE — a chosen mark must survive the length cap intact');
+{
+  const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const cap2 = s => [...seg.segment(String(s).trim())].map(x => x.segment).slice(0, 2).join('');
+  const RAVEN = '\u{1F426}‍⬛';
+  const FAMILY = '\u{1F468}‍\u{1F469}‍\u{1F467}';
+  const FLAG = '\u{1F1E8}\u{1F1F1}';
+  for (const [label, glyph] of [
+    ['raven (ZWJ)', RAVEN],
+    ['family (2x ZWJ)', FAMILY],
+    ['flag (regional)', FLAG],
+    ['cairn', '\u{1FAA8}'],
+  ]) ok(cap2(glyph) === glyph, `${label.padEnd(16)} survives intact (${[...glyph].length} code points, 1 grapheme)`);
+  ok(cap2('\u{1FAA8}\u{1F43A}\u{1F309}') === '\u{1FAA8}\u{1F43A}', 'three marks capped to two');
+  // The old naive implementation, kept as a witness that the bug was real.
+  ok([...RAVEN].slice(0, 2).join('') !== RAVEN,
+     'and the code-point cap really would have mangled it');
+}
+
+console.log('\nall findings closed, and each is enforced where it is used');
 console.log(fail ? `\n${fail} FAILED\n` : '\nall passed\n');
 process.exit(fail ? 1 : 0);

@@ -243,6 +243,9 @@ setInterval(() => {
 // markup-bearing string would break the icon rather than express anything. Not
 // a trust boundary — the mirror already runs AS the instance — but a mistake
 // here is silent and confusing, and the constraint costs nothing.
+const graphemeSeg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const graphemes = (s) => [...graphemeSeg.segment(s)].map(x => x.segment);
+
 const profilePath = path.join(cfg.dataDir, 'profile.json');
 let profileCache = { at: 0, mtime: 0, value: { glyph: null, color: null } };
 function readProfile() {
@@ -252,9 +255,18 @@ function readProfile() {
   let value = { glyph: null, color: null };
   try {
     const raw = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
-    // Grapheme-aware slice: an emoji is often 2+ UTF-16 units, and cutting one
-    // in half yields a replacement character rather than a shorter glyph.
-    const g = typeof raw.glyph === 'string' ? [...raw.glyph.trim()].slice(0, 2).join('') : '';
+    // Cut by GRAPHEME CLUSTER, not by code point.
+    //
+    // I shipped `[...str].slice(0,2)` first and called it grapheme-aware. It is
+    // not: the spread splits by CODE POINT. Axiom's raven is bird + zero-width
+    // joiner + black square — ONE grapheme, THREE code points — so the naive
+    // cap truncated it to a bird with a dangling joiner. I had already told her
+    // it would work.
+    //
+    // Intl.Segmenter is the only thing that actually knows where a grapheme
+    // ends. Verified: raven, family, and regional-indicator flags all report as
+    // a single grapheme and survive the cap intact.
+    const g = typeof raw.glyph === 'string' ? graphemes(raw.glyph.trim()).slice(0, 2).join('') : '';
     if (g && !/[<>&"']/.test(g)) value.glyph = g;
     if (typeof raw.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
       value.color = raw.color.trim();
