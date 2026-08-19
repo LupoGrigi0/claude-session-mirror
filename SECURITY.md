@@ -56,6 +56,48 @@ to the network invalidates it.
 is **assumed, not proven**. Set `MIRROR_REQUIRE_AUTH=1` to disable the stub and
 fail closed.
 
+### Authorisation is one function, not five checks
+
+`resolveIdentity()` almost never returns `null` — without `MIRROR_REQUIRE_AUTH`
+it falls through to the stub, so every caller sees a truthy participant. Write
+routes therefore must **not** ask "is there an identity?"; they ask
+`mayWrite(who)`, which is the single place the policy lives.
+
+This was a real defect, found by review: five write routes gated on presence
+alone, and `.trusted` appeared **zero times** in the whole server. The
+docstring promised *"null = unauthenticated, caller MUST fail closed"* and no
+caller had ever seen `null`. Survivable while the stub is the intended identity
+behind a private boundary — **not** survivable the moment Tailscale headers go
+live, because a forged header arrives marked `trusted: true`.
+
+### Two configurations that refuse to start
+
+Both were previously documented rather than enforced, which is the same thing as
+not being true:
+
+- **`MIRROR_BEHIND_TS_SERVE=1` with a non-loopback bind.** That flag means "these
+  headers are unforgeable because Serve strips client copies" — true only of
+  traffic that actually traversed Serve. Bound to a tailnet IP, any peer (or any
+  local process) reaches the listener directly and sets them by hand. `tailscale
+  serve` proxies to loopback anyway, so **loopback is the honest shape**.
+- **A public bind with the stub enabled.** The stub grants a name to anyone who
+  can reach the port.
+
+**Residual, stated so nobody mistakes it for closed:** even on loopback, any
+local process can reach the port and forge those headers. Closing that needs
+proof the Serve hop happened — a Serve-injected shared secret, a unix socket
+with mode bits, or a peer-credential check. Not implemented. Do not read "bound
+to loopback" as "authenticated".
+
+### The identity string itself is constrained
+
+`senderAddress()` builds `display@channel`, and that string is what the system
+trusts to say who is speaking. A display name containing `@`, whitespace or a
+control character could forge structure inside it — `evil@web` became
+`evil@web@web`, a newline split the address. Every construction site now
+constrains the field, **including the session-token path whose store does not
+exist yet**: code we intend to write is not a trustworthy upstream.
+
 ## Loopback is not a boundary
 
 If the mirror binds `127.0.0.1` behind a proxy, remember that **every local user
