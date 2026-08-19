@@ -12,7 +12,7 @@
 set -u
 DIR=$(mktemp -d)
 PORT=22097
-SRC=/mnt/coordinaton_mcp_data/instances/Cairn-2001/claude-session-mirror
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pass=0; fail=0
 ok(){ if [ "$1" = "1" ]; then echo "  ok  $2"; pass=$((pass+1)); else echo "FAIL  $2"; fail=$((fail+1)); fi; }
 

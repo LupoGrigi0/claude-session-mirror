@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { FileStore, safeName, isInlineImage } from '/mnt/coordinaton_mcp_data/instances/Cairn-2001/claude-session-mirror/src/files.mjs';
+import { FileStore, safeName, isInlineImage } from '../src/files.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mirrorfiles-'));
 const store = new FileStore(root);
