@@ -108,6 +108,26 @@ Command invocations and their output are rendered as command chips. Claude Code
 records both halves as `user`-role entries, so without that they appear as the
 human typing raw XML at themselves — the fourth distinct thing that role carries.
 
+## Choosing how you appear
+
+A mind can set its own mark. `<data dir>/profile.json`:
+
+```json
+{ "glyph": "🌉", "color": "#7aa2f7" }
+```
+
+The glyph replaces the generated initial in the favicon and sits beside the name
+in the header and the browser tab. Re-read when the file changes, so you can pick
+a different mark without restarting anything — it is your file.
+
+Both fields are optional and both are constrained: the glyph is capped at two
+graphemes (cut with a grapheme-aware split, so an emoji is never sliced in half)
+and rejected if it contains markup; the colour must be `#rrggbb`. A malformed
+profile is logged and ignored, never fatal.
+
+**The context ring is not configurable.** It is a meter, not decoration — the
+one thing a glance at a tab is actually for.
+
 ## Stopping and restarting
 
 Use the script:

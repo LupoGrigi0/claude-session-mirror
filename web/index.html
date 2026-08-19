@@ -1314,20 +1314,28 @@ stopBtn.addEventListener('click', async () => {
 // colour it by context pressure, so a BACKGROUND tab can warn you. Lupo found
 // Axiom at 88% by opening her tab; the tab should have said so first.
 let faviconState = '';
-function setFavicon(name, pct){
-  const key = `${name}|${pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : 'ok'}`;
+function setFavicon(name, pct, profile){
+  // A mind may choose its own mark: <dataDir>/profile.json {glyph, color}.
+  // The context RING is not negotiable — it is a meter, not decoration, and it
+  // is the one thing a glance at a tab is actually for.
+  const glyph = profile?.glyph || null;
+  const key = `${name}|${glyph || ''}|${profile?.color || ''}|${pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : 'ok'}`;
   if (key === faviconState) return;          // repainting every poll is wasteful
   faviconState = key;
   const initial = (name || '?').trim()[0].toUpperCase();
   let hue = 0; for (const ch of name || '') hue = (hue * 31 + ch.charCodeAt(0)) % 360;
+  const bg = profile?.color || `hsl(${hue},45%,28%)`;
   const ring = pct >= 85 ? '#f7768e' : pct >= 65 ? '#e0af68' : '#9ece6a';
+  const mark = glyph
+    ? `<text x="32" y="44" font-size="34" text-anchor="middle">${esc(glyph)}</text>`
+    : `<text x="32" y="42" font-family="system-ui,sans-serif" font-size="28"
+          font-weight="700" fill="#e6ecff" text-anchor="middle">${esc(initial)}</text>`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
-    <rect width="64" height="64" rx="14" fill="hsl(${hue},45%,28%)"/>
+    <rect width="64" height="64" rx="14" fill="${esc(bg)}"/>
     <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="5"
             stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
             transform="rotate(-90 32 32)"/>
-    <text x="32" y="42" font-family="system-ui,sans-serif" font-size="28"
-          font-weight="700" fill="#e6ecff" text-anchor="middle">${initial}</text>
+    ${mark}
   </svg>`;
   let link = document.querySelector('link[rel="icon"]');
   if (!link){ link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
@@ -1350,8 +1358,9 @@ setInterval(async () => {
     }
     if (h.limits?.max_upload_bytes)
       document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
-    document.getElementById('title').textContent = `${h.instance} · session mirror`;
-    document.title = `${h.instance} · mirror`;
+    const gl = h.profile?.glyph ? h.profile.glyph + ' ' : '';
+    document.getElementById('title').textContent = `${gl}${h.instance} · session mirror`;
+    document.title = `${gl}${h.instance} · mirror`;
     // Who else is watching. Two browsers can both type into one live session
     // and there is no serialization between them — seeing the other one is the
     // minimum honest mitigation.
@@ -1373,7 +1382,7 @@ setInterval(async () => {
       const fill = document.getElementById('ctxfill');
       fill.style.width = Math.min(100, pct) + '%';
       fill.className = pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : '';
-      setFavicon(h.instance || 'mirror', pct);
+      setFavicon(h.instance || 'mirror', pct, h.profile);
       document.getElementById('ctx').title =
         `${h.session.context_tokens.toLocaleString()} of ${h.session.context_window.toLocaleString()} tokens`
         + ` (raw API total; Claude Code's /context buckets differently)`;

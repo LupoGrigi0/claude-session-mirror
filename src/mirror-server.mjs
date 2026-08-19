@@ -227,6 +227,43 @@ setInterval(() => {
   }
 }, 30000).unref();
 
+// --- profile: how a mind chooses to be shown ---------------------------------
+//
+// Crossing signs off with a bridge, Axiom with a raven, Bastion with a wolf.
+// Those are self-descriptions, and until now the interface threw them away and
+// stamped everyone with the first letter of their name.
+//
+// <dataDir>/profile.json:   { "glyph": "🌉", "color": "#7aa2f7" }
+//
+// Re-read when the file's mtime changes, so a mind can change how it appears
+// without restarting anything — it owns this file, and should not need a
+// deployment to pick a different mark.
+//
+// The values are constrained: the glyph goes into an SVG data URI, so a long or
+// markup-bearing string would break the icon rather than express anything. Not
+// a trust boundary — the mirror already runs AS the instance — but a mistake
+// here is silent and confusing, and the constraint costs nothing.
+const profilePath = path.join(cfg.dataDir, 'profile.json');
+let profileCache = { at: 0, mtime: 0, value: { glyph: null, color: null } };
+function readProfile() {
+  let mtime = 0;
+  try { mtime = fs.statSync(profilePath).mtimeMs; } catch { profileCache.mtime = 0; return { glyph: null, color: null }; }
+  if (mtime === profileCache.mtime) return profileCache.value;
+  let value = { glyph: null, color: null };
+  try {
+    const raw = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+    // Grapheme-aware slice: an emoji is often 2+ UTF-16 units, and cutting one
+    // in half yields a replacement character rather than a shorter glyph.
+    const g = typeof raw.glyph === 'string' ? [...raw.glyph.trim()].slice(0, 2).join('') : '';
+    if (g && !/[<>&"']/.test(g)) value.glyph = g;
+    if (typeof raw.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
+      value.color = raw.color.trim();
+    }
+  } catch (err) { log(`profile.json ignored: ${err.message}`); }
+  profileCache = { at: Date.now(), mtime, value };
+  return value;
+}
+
 // --- health/observability counters -------------------------------------------
 const stats = { hooks: 0, events: 0, clients: 0, dropped: 0, lastEventAt: null, startedAt: Date.now() };
 let usage = null;   // latest context accounting, straight from the transcript
@@ -939,6 +976,7 @@ const server = http.createServer(async (req, res) => {
       // without inferring it from what happens to be missing.
       mode: cfg.mode,
       publishes_session: cfg.mode === 'full',
+      profile: readProfile(),
       // What this PROCESS is running, and whether the disk has moved under it.
       version: {
         commit: bootCommit,
