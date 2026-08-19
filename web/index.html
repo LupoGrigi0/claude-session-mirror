@@ -206,6 +206,22 @@
   #act{color:var(--cairn)}
   #act:not(:empty)::after{content:"·";color:var(--faint);margin:0 6px}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
+  /* Undo sits where the hand already is — recall is the common action. */
+  #sendstat .undo{background:none;border:0;border-bottom:1px dotted var(--cairn);
+                  color:var(--cairn);font:inherit;cursor:pointer;padding:0 1px}
+  #sendstat .undo:hover{border-bottom-style:solid}
+  /* Expedite sits by the NAME, deliberately far from Send: skipping the recall
+     window should take a second thought and a second action, not a fast tap in
+     the same place the first one landed. */
+  #expedite{display:flex;align-items:center;gap:6px;background:none;cursor:pointer;
+            border:1px solid var(--tool);color:var(--tool);border-radius:6px;
+            padding:3px 9px;font:11px var(--mono);flex:none}
+  #expedite[hidden]{display:none}
+  #expedite:hover{background:var(--tool);color:#12131c}
+  #expedol{display:inline-grid;place-items:center;min-width:16px;height:16px;
+           border-radius:50%;background:var(--tool);color:#12131c;
+           font-weight:700;font-size:10px}
+  #expedite:hover #expedol{background:#12131c;color:var(--tool)}
   /* Measured, not guessed: the composer wraps to two rows on a phone, so a
      constant here buries the newest message behind it — the one place the feed
      can least afford to hide something. */
@@ -239,6 +255,10 @@
 <header>
   <span class="dot" id="dot"></span>
   <h1 id="title">session mirror</h1>
+  <!-- Expedite lives HERE, by the name — deliberately far from Send, so
+       skipping the recall window takes a second thought and a second action.
+       Lupo's placement, and the reason for it is his too. -->
+  <button id="expedite" hidden title="Send it now, without waiting"><span id="expedol"></span>send now</button>
   <div id="ctx"><span id="ctxmodel"></span><span id="ctxbar"><span id="ctxfill"></span></span><span id="ctxpct"></span></div>
   <div id="viewers"></div>
   <div class="meta"><span id="act"></span><span id="stat">connecting…</span></div>
@@ -656,6 +676,8 @@ es.onerror = () => { dot.className = 'dot down'; stat.textContent = 'reconnectin
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const sendStat = document.getElementById('sendstat');
+const expediteBtn = document.getElementById('expedite');
+const expedol = document.getElementById('expedol');
 const DRAFT = 'mirror-draft';
 const outbox = [];    // {text, at} sent, awaiting confirmation FROM THE STREAM
                       // (deliberately NOT called `pending` — that word means
@@ -838,20 +860,113 @@ new ResizeObserver(syncComposerHeight).observe(composerEl);
 input.addEventListener('keydown', e => {
   if (!enterSends) return;                      // Enter is a newline; Send sends
   if (e.isComposing || e.keyCode === 229) return;   // IME / virtual keyboard
-  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); queueSend(); }
 });
-sendBtn.addEventListener('click', send);
+sendBtn.addEventListener('click', queueSend);
 resize(); refresh();
 
-async function send(){
-  if (inFlight) return;                     // a second tap must not re-send
+// --- recall window -----------------------------------------------------------
+// Hitting Send starts a countdown rather than a request. Until it expires the
+// message can be pulled back, unedited and unsent — the cheap 80% of "let me fix
+// that", without ever needing to mutate a live session.
+//
+// The delay scales with the message, which is Lupo's refinement and a better
+// rule than my fixed 3s: a one-word "yes" needs almost no grace, and a long
+// considered paragraph is exactly where you notice the thing you got wrong.
+//
+// Undo sits by the composer, where the hand already is, because recall is the
+// common action. EXPEDITE sits up by the name, far away, because skipping the
+// window should cost a second thought and a second action. Also his.
+function sendDelayMs(text){
+  const chars = text.length, lines = text.split('\n').length;
+  if (chars <= 80  && lines === 1) return 3000;   // "yes", "do it", one-liners
+  if (chars <= 400 && lines <= 4)  return 5000;
+  return 9000;                                    // paragraphs, lists, decisions
+}
+
+let pending = null;     // { text, timer, tick, at, ms }
+
+function paintPending(){
+  if (!pending){
+    expediteBtn.hidden = true;
+    sendStat.innerHTML = '';
+    return;
+  }
+  const left = Math.max(0, Math.ceil((pending.at + pending.ms - Date.now()) / 1000));
+  expediteBtn.hidden = false;
+  expedol.textContent = left;
+  sendStat.innerHTML = `sending in ${left}s — <button class="undo" id="undo">undo</button>`;
+  document.getElementById('undo').addEventListener('click', cancelPending);
+}
+
+function cancelPending(){
+  if (!pending) return;
+  clearTimeout(pending.timer); clearInterval(pending.tick);
+  const { text } = pending;
+  pending = null;
+  input.value = text;                     // handed back exactly as written
+  localStorage.setItem(DRAFT, text);
+  resize(); refresh(); paintPending();
+  sendStat.textContent = 'recalled — not sent';
+  setTimeout(() => { if (!pending) sendStat.textContent = ''; }, 2500);
+  input.focus();
+}
+
+function queueSend(){
   const text = input.value.trim();
+  if (!text) return;
+  // A second Send while one is queued means "and also this" — flush the first
+  // immediately so the session receives them in the order they were written.
+  if (pending) flushPending();
+  input.value = ''; localStorage.removeItem(DRAFT); resize(); refresh();
+  const ms = sendDelayMs(text);
+  pending = { text, at: Date.now(), ms, timer: null, tick: null };
+  pending.timer = setTimeout(flushPending, ms);
+  pending.tick  = setInterval(paintPending, 250);
+  paintPending();
+}
+
+function flushPending(){
+  if (!pending) return;
+  clearTimeout(pending.timer); clearInterval(pending.tick);
+  const { text } = pending;
+  pending = null;
+  paintPending();
+  send(text);
+}
+
+expediteBtn.addEventListener('click', flushPending);
+
+// A queued message must not die with the tab. keepalive lets the request outlive
+// the page; without it, closing a tab mid-window would silently eat the message.
+window.addEventListener('pagehide', () => {
+  if (!pending) return;
+  const { text } = pending;
+  clearTimeout(pending.timer); clearInterval(pending.tick);
+  pending = null;
+  try {
+    fetch(BASE + '/send', { method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify({ text }), keepalive: true });
+  } catch { /* nothing left to do from a closing page */ }
+});
+
+/** Hand a failed message back without destroying anything typed since. */
+function restoreUnsent(text){
+  input.value = input.value.trim() ? input.value.replace(/\s*$/,'') + '\n\n' + text : text;
+  localStorage.setItem(DRAFT, input.value);
+  resize(); refresh();
+}
+
+async function send(queuedText){
+  if (inFlight) return;                     // a second tap must not re-send
+  const text = (queuedText ?? input.value).trim();
   if (!text) return;
   inFlight = true;
   sendBtn.disabled = true;
-  // Clear optimistically: leaving the text in place is what let a double-tap
-  // fire twice. Restored below if the send actually fails.
-  input.value = ''; localStorage.removeItem(DRAFT); resize();
+  // Only clear when sending straight from the box. A queued flush must leave
+  // the composer alone — by then the human may be typing the next message, and
+  // wiping that would be a fresh way to lose someone's words.
+  if (queuedText === undefined){ input.value = ''; localStorage.removeItem(DRAFT); resize(); }
   sendStat.textContent = 'sending…';
   try{
     const r = await fetch(BASE + '/send', {
@@ -866,11 +981,11 @@ async function send(){
       // mirror stream. We never ask the instance to confirm anything (Law 9.1).
       sendStat.textContent = 'queued — waiting for it to land in the session';
     } else {
-      input.value = text; resize();          // give it back so nothing is lost
+      restoreUnsent(text);
       sendStat.textContent = `not sent: ${out.error || r.status}`;
     }
   } catch(err){
-    input.value = text; resize();
+    restoreUnsent(text);
     sendStat.textContent = `not sent: ${err.message}`;
   }
   inFlight = false;
