@@ -93,10 +93,46 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   PROJ="$INSTANCE_DIR/.claude/projects/$SLUG"
   [[ -d "$PROJ" ]] || die "no project dir at $PROJ"
 
-  # Newest .jsonl = the live session. Never cache a session id: teleports and
-  # forks can re-point it, so resolve it fresh at start.
-  TRANSCRIPT=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1)
-  [[ -n "$TRANSCRIPT" ]] || die "no transcript found in $PROJ"
+  # ---- which transcript? A TRUST LADDER, not a guess ---------------------------
+  #
+  # 1. CLAUDE_CODE_SESSION_ID from our own environment. Authoritative: it is the
+  #    session's own name for itself, and it survives --resume. Present whenever
+  #    this script is run BY the session it mirrors — which is the normal case,
+  #    since an instance starts its own mirror from its own shell.
+  #
+  #    Note it canNOT be read from outside: Claude Code injects it into the
+  #    environment given to CHILD processes, so /proc/<pid>/environ of a running
+  #    `claude` does not contain it. Bastion tested that before either of us
+  #    could build on it.
+  #
+  # 2. A recorded id, for starts from outside any session (a systemd unit at
+  #    boot). Written by layer 1 below, so an instance that has ever started its
+  #    own mirror leaves the answer behind for the machine.
+  #
+  # 3. Newest .jsonl by mtime. A heuristic wearing the costume of an answer:
+  #    correct whenever exactly one session is live, silently wrong when two are.
+  #    Kept as the last resort, and it says so.
+  SESSION_ID_FILE="$INSTANCE_DIR/.claude-session-id"
+  SID=""; SID_SRC=""
+  if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    SID="$CLAUDE_CODE_SESSION_ID"; SID_SRC="session environment (authoritative)"
+    # Leave it for the machine. A unit at boot has no session to ask.
+    printf '%s\n' "$SID" > "$SESSION_ID_FILE" 2>/dev/null || true
+  elif [[ -r "$SESSION_ID_FILE" ]]; then
+    SID="$(head -1 "$SESSION_ID_FILE" | tr -d '[:space:]')"; SID_SRC="recorded id"
+  fi
+
+  if [[ -n "$SID" ]]; then
+    TRANSCRIPT="$PROJ/$SID.jsonl"
+    # A named session whose transcript is missing is an ERROR, never a reason to
+    # quietly fall back to guessing — that is how you mirror the wrong mind.
+    [[ -f "$TRANSCRIPT" ]] || die "session id $SID names no transcript at $TRANSCRIPT
+       (from $SID_SRC). Refusing to guess — set MIRROR_TRANSCRIPT if you know better."
+  else
+    SID_SRC="newest by mtime (GUESS — no session id available)"
+    TRANSCRIPT=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1)
+    [[ -n "$TRANSCRIPT" ]] || die "no transcript found in $PROJ"
+  fi
 
   # …but say so when the choice is AMBIGUOUS.
   #
@@ -110,12 +146,16 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   # wrong means a mind waking up inside someone else's conversation. For a mirror
   # the cost is lower (wrong session published) but the ambiguity is identical,
   # so the least it can do is refuse to be quietly confident.
+  # Still worth saying even when we HAVE an authoritative answer: a positive
+  # signal does not make the negative detection worthless, it makes it the check
+  # on the positive signal, which is where it belongs.
   RECENT=$(find "$PROJ" -maxdepth 1 -name '*.jsonl' -newermt '-10 minutes' 2>/dev/null | wc -l)
   if [[ "$RECENT" -gt 1 ]]; then
-    echo "!! WARNING: $RECENT transcripts in this project were written in the last 10 minutes." >&2
-    echo "!!          More than one session may be live. Mirroring the most recent:" >&2
-    echo "!!            $TRANSCRIPT" >&2
-    echo "!!          If that is the wrong one, set MIRROR_TRANSCRIPT explicitly." >&2
+    echo "!! NOTE: $RECENT transcripts here were written in the last 10 minutes —" >&2
+    echo "!!       more than one session may be live." >&2
+    echo "!!       Mirroring: $TRANSCRIPT" >&2
+    echo "!!       chosen by: $SID_SRC" >&2
+    [[ "$SID_SRC" == newest* ]] && echo "!!       That is a GUESS. Set MIRROR_TRANSCRIPT to be certain." >&2
   fi
   AGE_S=$(( $(date +%s) - $(stat -c %Y "$TRANSCRIPT") ))
 fi
@@ -183,7 +223,8 @@ fi
 cat <<EOF
 instance   : $INSTANCE
 mode       : $([[ $PERMS_ONLY -eq 1 ]] && echo "permissions-only — NOTHING about this session is published" || echo "full — this publishes your whole session")
-transcript : ${TRANSCRIPT:-none (not read in permissions mode)}${AGE_S:+  (last written ${AGE_S}s ago)}
+transcript : ${TRANSCRIPT:-none (not read in permissions mode)}${AGE_S:+  (last written ${AGE_S}s ago)}${SID_SRC:+
+  chosen by: $SID_SRC}
 url        : http://${BIND}:${PORT}${MIRROR_BASE_PATH}
 input      : $([[ ${MIRROR_ALLOW_SEND:-0} == 1 ]] && echo "on (channel $CHANNEL_PORT)" || echo "off")
 interrupt  : $([[ $WITH_INTERRUPT -eq 1 ]] && echo "on" || { [[ $PERMS_ONLY -eq 1 ]] && echo "off (pass --with-interrupt to enable)" || echo "on (full mode default)"; })
