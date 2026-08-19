@@ -272,6 +272,8 @@
   .qlabel{color:var(--human);font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.5px}
   .qq{color:var(--faint);overflow-wrap:anywhere}
   .qpick{color:var(--fg);font-weight:700}
+  #stalebar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--err);
+            color:#12131c;font:12px/1.4 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
   .empty.permsonly{font-style:normal;max-width:520px;margin:0 auto;text-align:left;
                    line-height:1.65;color:var(--dim);border:1px solid var(--line);
@@ -1338,6 +1340,14 @@ setInterval(async () => {
     const h = await (await fetch(BASE + '/health')).json();
     lastHealth = h;
     if (!settings.hidden) refreshSettings();
+    // A process running code older than the files it serves will hand out
+    // buttons whose endpoints do not exist. Say so, loudly, in the header.
+    if (h.version?.restart_required && !document.getElementById('stalebar')){
+      const b = document.createElement('div');
+      b.id = 'stalebar';
+      b.textContent = 'this mirror\u2019s code changed on disk \u2014 restart it to apply (the page may show controls the server does not have)';
+      document.body.appendChild(b);
+    }
     if (h.limits?.max_upload_bytes)
       document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
     document.getElementById('title').textContent = `${h.instance} · session mirror`;

@@ -173,6 +173,50 @@ if (cfg.mode === 'full') try {
   log(`schema canary skipped: ${err.message}`);
 }
 
+// --- version, and whether this process is stale ------------------------------
+//
+// Four mirrors ran for three days on copies frozen at whenever each was set up,
+// and nothing anywhere said so. From inside the deployment that was current,
+// everything looked fine — the same blind spot as every other defect this week.
+//
+// So the process reports what it is running, and notices when the code under it
+// changes. The dangerous case is NOT stale files; it is FRESH files with a stale
+// process: web/index.html is re-read on every request, so a pull-without-restart
+// serves a new page against an old server. That renders buttons which POST to
+// endpoints the running process does not have.
+//
+// Deliberately local — nothing phones home. It compares the running process to
+// the disk beneath it, which is the question that actually has a wrong answer.
+const SRC_DIR = new URL('.', import.meta.url).pathname;
+function srcFingerprint() {
+  const parts = [];
+  try {
+    for (const f of fs.readdirSync(SRC_DIR).filter(n => n.endsWith('.mjs')).sort()) {
+      const st = fs.statSync(path.join(SRC_DIR, f));
+      parts.push(`${f}:${st.size}:${Math.floor(st.mtimeMs)}`);
+    }
+  } catch { /* unreadable — report what we have */ }
+  return parts.join('|');
+}
+function gitCommit() {
+  try {
+    const head = fs.readFileSync(path.join(SRC_DIR, '..', '.git', 'HEAD'), 'utf8').trim();
+    const m = /^ref: (.+)$/.exec(head);
+    if (!m) return head.slice(0, 12);
+    return fs.readFileSync(path.join(SRC_DIR, '..', '.git', m[1]), 'utf8').trim().slice(0, 12);
+  } catch { return null; }
+}
+const bootFingerprint = srcFingerprint();
+const bootCommit = gitCommit();
+let srcChangedAt = null;
+setInterval(() => {
+  if (srcChangedAt) return;                        // already known; stop stat-ing
+  if (srcFingerprint() !== bootFingerprint) {
+    srcChangedAt = Date.now();
+    log('SOURCE CHANGED ON DISK — this process is running the OLD code. Restart to apply.');
+  }
+}, 30000).unref();
+
 // --- health/observability counters -------------------------------------------
 const stats = { hooks: 0, events: 0, clients: 0, dropped: 0, lastEventAt: null, startedAt: Date.now() };
 let usage = null;   // latest context accounting, straight from the transcript
@@ -873,6 +917,12 @@ const server = http.createServer(async (req, res) => {
       // without inferring it from what happens to be missing.
       mode: cfg.mode,
       publishes_session: cfg.mode === 'full',
+      // What this PROCESS is running, and whether the disk has moved under it.
+      version: {
+        commit: bootCommit,
+        src_changed_on_disk: Boolean(srcChangedAt),
+        restart_required: Boolean(srcChangedAt),
+      },
       epoch: eventLog.epoch,
       seq: eventLog.seq,
       clients: clients.size,
