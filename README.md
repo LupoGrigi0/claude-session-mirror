@@ -108,6 +108,36 @@ Command invocations and their output are rendered as command chips. Claude Code
 records both halves as `user`-role entries, so without that they appear as the
 human typing raw XML at themselves — the fourth distinct thing that role carries.
 
+## Stopping and restarting
+
+Use the script:
+
+```bash
+./bin/mirror-stop.sh          # graceful
+./bin/mirror-stop.sh --force  # only for builds older than 596503c (see below)
+./bin/mirror-start.sh …       # then start again
+```
+
+⚠️ **Do not use `pkill -f 'mirror-server.mjs'`.** It matches the full command
+line of every process — *including the shell running that very command*. So it
+kills itself. In a restart script that means the mirror stops and never comes
+back, and the terminal that would have told you is gone too.
+
+Two people hit this independently within a day. The stop script matches the
+*executable* and then reads each candidate's real command line from `/proc`,
+filtered by uid so it can never touch another instance's mirror.
+
+**Upgrading from a build older than `596503c`:** that version hangs on SIGTERM
+while a browser is attached — `server.close()` waits for SSE streams that never
+end. The upgrade that fixes hung shutdowns cannot be applied without hitting one,
+so `--force` is correct exactly once.
+
+**`web/` changes need no restart; `src/` changes do.** The page is re-read from
+disk on every request, but the server is loaded once. Updating only the HTML
+gives you buttons that POST to endpoints the running process does not have — so
+a mirror now fingerprints its own source, and shows a red bar when the code
+beneath it has changed.
+
 ## Known issue: two writers
 
 A session can be driven from the browser **and** from `tmux attach` at the same
