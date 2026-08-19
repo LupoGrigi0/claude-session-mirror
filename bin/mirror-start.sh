@@ -97,6 +97,27 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   # forks can re-point it, so resolve it fresh at start.
   TRANSCRIPT=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1)
   [[ -n "$TRANSCRIPT" ]] || die "no transcript found in $PROJ"
+
+  # …but say so when the choice is AMBIGUOUS.
+  #
+  # `ls -t | head -1` is a heuristic wearing the costume of an answer. It is
+  # right whenever exactly one session is live, and silently wrong when two are:
+  # a second `claude` started by hand in the same project directory produces a
+  # second growing transcript, and this would mirror whichever touched disk most
+  # recently — which can alternate between them minute to minute.
+  #
+  # Bastion is solving the sharper version of this for `--resume`, where picking
+  # wrong means a mind waking up inside someone else's conversation. For a mirror
+  # the cost is lower (wrong session published) but the ambiguity is identical,
+  # so the least it can do is refuse to be quietly confident.
+  RECENT=$(find "$PROJ" -maxdepth 1 -name '*.jsonl' -newermt '-10 minutes' 2>/dev/null | wc -l)
+  if [[ "$RECENT" -gt 1 ]]; then
+    echo "!! WARNING: $RECENT transcripts in this project were written in the last 10 minutes." >&2
+    echo "!!          More than one session may be live. Mirroring the most recent:" >&2
+    echo "!!            $TRANSCRIPT" >&2
+    echo "!!          If that is the wrong one, set MIRROR_TRANSCRIPT explicitly." >&2
+  fi
+  AGE_S=$(( $(date +%s) - $(stat -c %Y "$TRANSCRIPT") ))
 fi
 
 # ---- pick a port --------------------------------------------------------------
@@ -162,7 +183,7 @@ fi
 cat <<EOF
 instance   : $INSTANCE
 mode       : $([[ $PERMS_ONLY -eq 1 ]] && echo "permissions-only — NOTHING about this session is published" || echo "full — this publishes your whole session")
-transcript : ${TRANSCRIPT:-none (not read in permissions mode)}
+transcript : ${TRANSCRIPT:-none (not read in permissions mode)}${AGE_S:+  (last written ${AGE_S}s ago)}
 url        : http://${BIND}:${PORT}${MIRROR_BASE_PATH}
 input      : $([[ ${MIRROR_ALLOW_SEND:-0} == 1 ]] && echo "on (channel $CHANNEL_PORT)" || echo "off")
 interrupt  : $([[ $WITH_INTERRUPT -eq 1 ]] && echo "on" || { [[ $PERMS_ONLY -eq 1 ]] && echo "off (pass --with-interrupt to enable)" || echo "on (full mode default)"; })
