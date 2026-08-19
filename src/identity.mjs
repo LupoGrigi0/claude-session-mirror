@@ -44,6 +44,42 @@ function decodeHeader(v) {
 }
 
 /**
+ * Constrain a field that will become part of a wire identity.
+ *
+ * senderAddress() builds `${display}@${channel}`, and that string is what the
+ * whole system trusts to say who is speaking. So a display name containing '@',
+ * whitespace or a control character can forge structure inside the very
+ * primitive this module exists to make trustworthy: a display of `evil@web`
+ * yields `evil@web@web`, and a newline splits the address outright.
+ *
+ * Axiom found this reading the module as an attacker. It is the Genevieve
+ * failure aimed at its own fix — and the same shape as the Content-Disposition
+ * CRLF note: enforce the guarantee where the value is CONSTRUCTED, not by
+ * hoping every upstream source is well-behaved. A session store is a future
+ * upstream source, and it is not written yet.
+ */
+function addressSafe(v, fallback) {
+  const s = String(v ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')   // control chars, incl. CR/LF
+    .replace(/[@\s]+/g, '_')                 // '@' and whitespace are structure
+    .trim()
+    .slice(0, 64);
+  return s || fallback;
+}
+
+/** Loopback, RFC1918, or the tailscale CGNAT range — never the public internet. */
+export function isPrivateBind(addr) {
+  const a = String(addr || '');
+  if (a === '::1' || a === 'localhost' || /^127\./.test(a)) return true;
+  if (/^10\./.test(a) || /^192\.168\./.test(a)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return true;
+  const cg = /^100\.(\d+)\./.exec(a);          // 100.64.0.0/10 — tailscale
+  if (cg && Number(cg[1]) >= 64 && Number(cg[1]) <= 127) return true;
+  if (/^fd[0-9a-f]{2}:/i.test(a) || /^fe80:/i.test(a)) return true;
+  return false;
+}
+
+/**
  * SOURCE 1 — Tailscale Serve.
  *
  * When traffic arrives via `tailscale serve`, tailscaled injects these headers
@@ -63,9 +99,9 @@ export function fromTailscaleHeaders(headers) {
   if (!login) return null;
   const name = decodeHeader(headers['tailscale-user-name']) || login.split('@')[0];
   return {
-    id: login,
+    id: addressSafe(login, 'unknown'),
     kind: 'human',
-    display: name,
+    display: addressSafe(name, 'unknown'),
     channel: 'web',
     source: 'tailscale-serve',
     trusted: true,
@@ -89,15 +125,25 @@ export function fromTailscaleHeaders(headers) {
 export function fromSessionToken(headers, lookup) {
   const bearer = /^Bearer\s+(.+)$/i.exec(headers['authorization'] || '');
   const cookie = /(?:^|;\s*)mirror_session=([^;]+)/.exec(headers['cookie'] || '');
-  const token = bearer?.[1] || (cookie ? decodeURIComponent(cookie[1]) : null);
+  // decodeURIComponent THROWS on a malformed % sequence. Unwrapped, a bad
+  // mirror_session cookie became an unhandled exception per request. An auth
+  // path must fail CLOSED on garbage, never throw — a crash is not a denial.
+  let token = bearer?.[1] || null;
+  if (!token && cookie) {
+    try { token = decodeURIComponent(cookie[1]); } catch { return null; }
+  }
   if (!token || typeof lookup !== 'function') return null;
 
   const session = lookup(token);          // ← real session store plugs in here
   if (!session) return null;
   return {
-    id: session.id,
+    // A session store is a FUTURE upstream source and is not written yet, so it
+    // gets the same constraint as a header. Trusting a value because it came
+    // from code we intend to write is the purest form of the invariant-that-
+    // lives-elsewhere.
+    id: addressSafe(session.id, 'unknown'),
     kind: 'human',
-    display: session.display || session.id,
+    display: addressSafe(session.display || session.id, 'unknown'),
     channel: 'web',
     source: 'session-token',
     trusted: true,
@@ -122,12 +168,12 @@ export function stubIdentity() {
   const raw = process.env.MIRROR_STUB_IDENTITY || 'user|User';
   const [id, display] = raw.split('|');
   return {
-    id: id || 'user',
+    id: addressSafe(id, 'user'),
     kind: 'human',
-    display: display || id || 'User',
+    display: addressSafe(display || id, 'User'),
     channel: 'web',
     source: 'STUB',        // surfaced in /health and logged — never silent
-    trusted: false,        // downstream may refuse untrusted identities
+    trusted: false,        // NOT a suggestion — see mayWrite() below
   };
 }
 
@@ -143,6 +189,69 @@ export function resolveIdentity(req, opts = {}) {
   return fromTailscaleHeaders(h)
       || fromSessionToken(h, opts.sessionLookup)
       || stubIdentity();
+}
+
+/**
+ * MAY THIS PARTICIPANT ACT? — the single place that answers it.
+ *
+ * resolveIdentity() almost never returns null: without MIRROR_REQUIRE_AUTH it
+ * falls through to the stub, so every caller sees a truthy participant. Five
+ * write routes were therefore gating on `if (!who)` — presence, not trust — and
+ * NOTHING in the server checked `.trusted` at all. Axiom found that: the
+ * docstring promised "null = unauthenticated, caller MUST fail closed", and no
+ * caller had ever seen null.
+ *
+ * Today that is survivable, because the stub IS the intended identity behind a
+ * private boundary. It stops being survivable the moment source 1 goes live: a
+ * forged header would arrive marked trusted:true, and presence-checking routes
+ * would wave it through.
+ *
+ * So the policy lives here, once, instead of being re-derived by five handlers
+ * — the same quarantine as files.mjs. A handler cannot forget a rule it does
+ * not implement.
+ */
+export function mayWrite(participant) {
+  if (!participant) return false;
+  if (participant.trusted) return true;
+  // The stub is acceptable ONLY while the network boundary is the authenticator.
+  // MIRROR_REQUIRE_AUTH=1 already removes the stub entirely; this is belt to
+  // that suspenders, so the rule is legible at the point of decision.
+  return participant.source === 'STUB' && process.env.MIRROR_REQUIRE_AUTH !== '1';
+}
+
+/**
+ * Refuse to start in a configuration whose safety nobody has stated.
+ *
+ * Two ways the deployment can quietly disagree with the code:
+ *
+ *  1. MIRROR_BEHIND_TS_SERVE=1 while bound to a NON-loopback address. The flag
+ *     says "identity headers are unforgeable because serve strips them" — but
+ *     that is only true of traffic that actually traversed serve. Bound to the
+ *     tailnet IP, any peer (or any local process) reaches the listener directly
+ *     and can set those headers by hand. `tailscale serve` proxies to loopback
+ *     anyway, so loopback IS the honest shape behind serve. Enforced, because
+ *     "documented" is precisely the false invariant we keep finding.
+ *
+ *  2. the stub active while bound somewhere public. The stub grants a name to
+ *     anyone who can reach the port; that is only defensible behind a private
+ *     interface.
+ *
+ * @returns {string|null} a reason to refuse, or null to proceed
+ */
+export function identityStartupRefusal(bind) {
+  const priv = isPrivateBind(bind);
+  if (process.env.MIRROR_BEHIND_TS_SERVE === '1' && !/^127\.|^::1$|^localhost$/.test(String(bind))) {
+    return `MIRROR_BEHIND_TS_SERVE=1 but bound to ${bind}.\n` +
+      `  Those headers are only unforgeable for traffic that came THROUGH serve.\n` +
+      `  Bound to a non-loopback address, any peer can set them by hand.\n` +
+      `  tailscale serve proxies to loopback — bind 127.0.0.1 instead.`;
+  }
+  if (!priv && process.env.MIRROR_REQUIRE_AUTH !== '1') {
+    return `bound to ${bind}, which is not a private interface, with the identity\n` +
+      `  stub still enabled. The stub grants a name to anyone who can reach the\n` +
+      `  port. Set MIRROR_REQUIRE_AUTH=1, or bind somewhere private.`;
+  }
+  return null;
 }
 
 /**

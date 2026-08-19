@@ -28,7 +28,8 @@ import path from 'node:path';
 import { EventLog } from './eventlog.mjs';
 import { TranscriptTailer } from './tailer.mjs';
 import { schemaCanary } from './normalizer.mjs';
-import { resolveIdentity, senderAddress, stubIdentity } from './identity.mjs';
+import { resolveIdentity, senderAddress, stubIdentity, mayWrite,
+         identityStartupRefusal } from './identity.mjs';
 import { FileStore, MAX_UPLOAD_BYTES, isInlineImage } from './files.mjs';
 import { execFile } from 'node:child_process';
 
@@ -124,6 +125,15 @@ if (cfg.mode === 'permissions' && !cfg.channelUrl) {
   console.error('MIRROR_MODE=permissions requires MIRROR_CHANNEL_URL — there is nothing to do without it');
   process.exit(1);
 }
+// A configuration whose safety nobody has stated must not start. See
+// identityStartupRefusal() for the two cases and why each is enforced rather
+// than documented.
+const idRefusal = identityStartupRefusal(cfg.bind);
+if (idRefusal) {
+  console.error(`refusing to start: ${idRefusal}`);
+  process.exit(1);
+}
+
 fs.mkdirSync(cfg.dataDir, { recursive: true });
 
 // --- mode stickiness ---------------------------------------------------------
@@ -545,7 +555,7 @@ const server = http.createServer(async (req, res) => {
     // Identity is resolved in exactly one place (src/identity.mjs). If it
     // cannot be established we refuse — no anonymous speech into a mind.
     const who = resolveIdentity(req);
-    if (!who) { res.writeHead(401, {'Content-Type':'application/json'})
+    if (!mayWrite(who)) { res.writeHead(401, {'Content-Type':'application/json'})
                    .end(JSON.stringify({ ok:false, error:'unauthenticated' })); return; }
 
     let body = {};
@@ -606,7 +616,7 @@ const server = http.createServer(async (req, res) => {
          .end(JSON.stringify({ ok:false, error:'X-Filename header required' })); return;
     }
     const who = resolveIdentity(req);
-    if (!who) { res.writeHead(401, {'Content-Type':'application/json'})
+    if (!mayWrite(who)) { res.writeHead(401, {'Content-Type':'application/json'})
                    .end(JSON.stringify({ ok:false, error:'unauthenticated' })); return; }
 
     // Check the declared length BEFORE reading a byte.
@@ -750,7 +760,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(415).end('content-type must be application/json'); return;
     }
     const who = resolveIdentity(req);
-    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!mayWrite(who)) { res.writeHead(401).end('unauthenticated'); return; }
     if (!cfg.allowInterrupt) {
       res.writeHead(403, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error:'interrupt is not enabled on this mirror' })); return;
@@ -800,7 +810,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(415).end('content-type must be application/json'); return;
     }
     const who = resolveIdentity(req);
-    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!mayWrite(who)) { res.writeHead(401).end('unauthenticated'); return; }
     if (!cfg.allowCommands) {
       res.writeHead(403, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error:'slash commands are not enabled on this mirror' }));
@@ -859,7 +869,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(415).end('content-type must be application/json'); return;
     }
     const who = resolveIdentity(req);
-    if (!who) { res.writeHead(401).end('unauthenticated'); return; }
+    if (!mayWrite(who)) { res.writeHead(401).end('unauthenticated'); return; }
 
     let body = {};
     try { body = JSON.parse(await readBody(req)); } catch { /* below */ }
@@ -980,6 +990,7 @@ const server = http.createServer(async (req, res) => {
         commands: cfg.allowCommands ? [...cfg.commandAllow].sort() : false,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
+        may_write: mayWrite(resolveIdentity(req)),
       },
     }, null, 2));
     return;
