@@ -8,6 +8,9 @@
 #   ./bin/mirror-start.sh                    # read-only mirror
 #   ./bin/mirror-start.sh --with-input       # also accept messages from the browser
 #   ./bin/mirror-start.sh --permissions-only # publish NOTHING; approvals panel only
+#   ./bin/mirror-start.sh --permissions-only --with-input
+#                                            # approvals + conversation, still no
+#                                            # transcript. What a root session wants.
 #
 # WHAT THIS PUBLISHES: everything in your session — your prose, every tool call
 # and its output, your subagents' work, and the fact (not content) of thinking —
@@ -38,22 +41,25 @@ for arg in "$@"; do
   esac
 done
 
-# REFUSE the contradictory combination rather than resolving it.
+# PUBLISHING and INPUT are orthogonal axes, not opposites.
 #
-# Found by Bastion reviewing this as an adversary: the arg loop accepted both,
-# and the --with-input export ran afterwards and unconditionally, so
-# `--permissions-only --with-input` produced permissions mode WITH message
-# injection into a root session — the exact outcome the decoupling exists to
-# prevent. The guard was real; the arg parser walked around it.
+#   --permissions-only is a READ decision:  does the transcript reach a viewer?
+#   --with-input       is a WRITE decision: can a viewer reach the session?
 #
-# An operator who typed both flags does not have a coherent request, so this
-# does not pick a winner. It stops.
-if [[ $PERMS_ONLY -eq 1 && $WITH_INPUT -eq 1 ]]; then
-  echo "error: --permissions-only and --with-input contradict each other." >&2
-  echo "       --permissions-only publishes nothing and accepts no messages;" >&2
-  echo "       --with-input injects into your live session. Pick one." >&2
-  exit 1
-fi
+# "Don't publish my session, but do let me talk to you" is a coherent request —
+# and it is precisely what a root session wants: the approval panel plus a
+# composer, and no transcript.
+#
+# This briefly REFUSED the combination. Bastion recommended that, then corrected
+# himself: the bug he actually found was --with-input silently overriding the
+# send=0 default through flag ORDERING, with no warning. That is a real footgun,
+# but the fix is that a write grant must be STATED rather than acquired as a side
+# effect — not that a legitimate combination is forbidden. He caught his own
+# over-correction before a feature request could reveal it, which is the same
+# discipline as catching mine.
+#
+# So every grant below is decided ONCE, from the flags, in one place. Nothing is
+# granted by being exported later than something else.
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -118,37 +124,39 @@ export MIRROR_BIND="$BIND"
 export MIRROR_BASE_PATH="${MIRROR_BASE_PATH:-/${INSTANCE%%-*}}"
 export MIRROR_ROOM="${MIRROR_ROOM:-$INSTANCE}"
 
+# ---- grants: each decided once, from the flags -------------------------------
+# A write capability is granted ONLY by asking for it. Never by flag ordering,
+# never inherited from the caller's environment.
+ALLOW_SEND=$WITH_INPUT
+ALLOW_INTERRUPT=$WITH_INTERRUPT
+# Full mode keeps its historical default: interrupt available when there is a
+# tmux session to interrupt. Permissions mode grants nothing it wasn't asked for.
+if [[ $PERMS_ONLY -eq 0 && $WITH_INTERRUPT -eq 0 ]]; then ALLOW_INTERRUPT=1; fi
+
 if [[ $PERMS_ONLY -eq 1 ]]; then
-  [[ -n "$CHANNEL_PORT" ]] || die "--permissions-only needs a channelPort in $IDENTITY"
   export MIRROR_MODE=permissions
-  export MIRROR_CHANNEL_URL="http://127.0.0.1:${CHANNEL_PORT}"
-  export MIRROR_STUB_IDENTITY="${MIRROR_STUB_IDENTITY:-lupo|Lupo}"
-  # SET, never defaulted from the environment. `${MIRROR_ALLOW_SEND:-0}` would
-  # inherit a value an operator happened to export in their shell, so "defaults
-  # off in this mode" would only be true when unset. It is now unconditional.
-  export MIRROR_ALLOW_SEND=0
 else
   export MIRROR_TRANSCRIPT="$TRANSCRIPT"
 fi
 
-if [[ $WITH_INPUT -eq 1 ]]; then
-  [[ -n "$CHANNEL_PORT" ]] || die "--with-input needs a channelPort in $IDENTITY"
+# The channel URL is needed by BOTH the permission poll and the send path, which
+# is exactly why "has a channel URL" must never imply "may write" — the server
+# reads MIRROR_ALLOW_SEND, and only that.
+if [[ $PERMS_ONLY -eq 1 || $ALLOW_SEND -eq 1 ]]; then
+  [[ -n "$CHANNEL_PORT" ]] || die "this mode needs a channelPort in $IDENTITY"
   export MIRROR_CHANNEL_URL="http://127.0.0.1:${CHANNEL_PORT}"
   export MIRROR_STUB_IDENTITY="${MIRROR_STUB_IDENTITY:-lupo|Lupo}"
-  export MIRROR_ALLOW_SEND=1
+fi
+
+export MIRROR_ALLOW_SEND="$ALLOW_SEND"
+export MIRROR_ALLOW_INTERRUPT="$ALLOW_INTERRUPT"
+
+if [[ $ALLOW_SEND -eq 1 ]]; then
   echo "!! input ENABLED — the browser can inject messages into your live session."
   echo "!! identity is a STUB (${MIRROR_STUB_IDENTITY%%|*}); it trusts the network boundary."
 fi
-
-# Interrupt is a WRITE into a live session — console access, one fixed keystroke.
-# It used to be enabled by merely knowing the tmux session name, which meant
-# permissions mode refused message injection while still offering ESC to a root
-# session. Both are writes; both now need a grant. Explicit opt-in here.
-if [[ $WITH_INTERRUPT -eq 1 ]]; then
-  export MIRROR_ALLOW_INTERRUPT=1
+if [[ $ALLOW_INTERRUPT -eq 1 && $PERMS_ONLY -eq 1 ]]; then
   echo "!! interrupt ENABLED — the browser can send ESC to your live session."
-elif [[ $PERMS_ONLY -eq 1 ]]; then
-  export MIRROR_ALLOW_INTERRUPT=0
 fi
 
 cat <<EOF

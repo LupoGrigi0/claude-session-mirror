@@ -605,6 +605,9 @@ const BASE = '__BASE_PATH__';
 // The real enforcement is in the server — every disclosing route 404s in
 // permissions mode — so this is presentation, never the guarantee.
 const MODE = '__MIRROR_MODE__';
+// Publishing and input are ORTHOGONAL: a mirror can withhold the transcript and
+// still accept messages. That combination is what a root session wants.
+const CAN_SEND = '__MIRROR_SEND__' === 'true';
 const clientParams = new URLSearchParams({
   vw: String(window.innerWidth), vh: String(window.innerHeight),
   dpr: String(window.devicePixelRatio || 1),
@@ -803,7 +806,9 @@ new ResizeObserver(syncHeaderHeight).observe(document.querySelector('header'));
 // read as "the mirror is broken" rather than "this mirror deliberately shows
 // you nothing about the session."
 if (MODE === 'permissions'){
-  document.getElementById('composer').style.display = 'none';
+  // The composer survives if input was granted — withholding the transcript
+  // says nothing about whether someone may speak to the session.
+  if (!CAN_SEND) document.getElementById('composer').style.display = 'none';
   document.getElementById('earlier')?.remove();
   const empty = document.getElementById('empty');
   if (empty){
@@ -813,7 +818,11 @@ if (MODE === 'permissions'){
       + `This mirror does not read the session transcript. No prose, no commands,`
       + ` no tool output, no subagent work — nothing about this session is published here.<br><br>`
       + `Permission requests appear at the top when there are any, with the literal`
-      + ` command, and disappear once answered.`;
+      + ` command, and disappear once answered.`
+      + (CAN_SEND
+          ? `<br><br>You <em>can</em> send messages. Replies arrive in the session,`
+          + ` not on this page — nothing it says is published here.`
+          : ``);
   }
 }
 

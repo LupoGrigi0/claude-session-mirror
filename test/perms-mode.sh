@@ -105,11 +105,25 @@ echo "6. the log file itself stays clean"
 ok "$([ "$(wc -l < "$DIR/data/permtest.jsonl")" = "3" ] && echo 1 || echo 0)" "nothing new was appended to the event log"
 
 echo
-echo "7. Bastion's findings — the flag combination is refused (F1)"
-OUT=$(HACS_IDENTITY_FILE=/nonexistent bash "$SRC/bin/mirror-start.sh" --permissions-only --with-input 2>&1)
-RC=$?
-ok "$([ "$RC" != "0" ] && echo 1 || echo 0)" "--permissions-only --with-input exits non-zero ($RC)"
-ok "$(echo "$OUT" | grep -qi 'contradict' && echo 1 || echo 0)" "and says why, before touching identity"
+echo "7. read and write are orthogonal (F1, as Bastion corrected it)"
+# The combination is LEGITIMATE — don't publish my session, but let me talk to
+# you — and is what a root session wants. What must never happen is a write
+# grant arriving by flag ORDERING rather than by being asked for.
+TD2=$(mktemp -d); printf '{"instanceId":"Flag-0000","channelPort":21999}' > "$TD2/.hacs-identity"
+run_flags(){ HOME=/tmp HACS_IDENTITY_FILE="$TD2/.hacs-identity" MIRROR_PORT=22094 \
+  timeout 2 bash "$SRC/bin/mirror-start.sh" "$@" 2>&1 | head -12; }
+A=$(run_flags --permissions-only)
+B=$(run_flags --permissions-only --with-input)
+C=$(run_flags --permissions-only --with-input --with-interrupt)
+ok "$(echo "$A" | grep -q 'input      : off' && echo 1 || echo 0)" "--permissions-only alone: input off"
+ok "$(echo "$B" | grep -q 'input      : on' && echo 1 || echo 0)" "--permissions-only --with-input: input ON (allowed, not refused)"
+ok "$(echo "$B" | grep -q 'NOTHING about this session is published' && echo 1 || echo 0)" "...and still publishes nothing"
+ok "$(echo "$B" | grep -q 'interrupt  : off' && echo 1 || echo 0)" "...and does NOT also grant interrupt"
+ok "$(echo "$C" | grep -q 'interrupt  : on' && echo 1 || echo 0)" "interrupt only when asked for explicitly"
+# The original footgun: a stray env var must not become a grant.
+D=$(MIRROR_ALLOW_SEND=1 run_flags --permissions-only)
+ok "$(echo "$D" | grep -q 'input      : off' && echo 1 || echo 0)" "an inherited MIRROR_ALLOW_SEND=1 does NOT grant send"
+rm -rf "$TD2"
 
 echo
 echo "8. /health leaks a count, never the list (F2)"
