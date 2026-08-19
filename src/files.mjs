@@ -75,12 +75,23 @@ export function safeName(raw) {
   let s = String(raw || '').split(/[\\/]/).pop() || '';
   s = s.replace(/[\u0000-\u001f\u007f]/g, '');       // control chars
   s = s.replace(/[^A-Za-z0-9._-]/g, '_');            // everything else
-  s = s.replace(/\.{2,}/g, '.');                     // no '..' can survive
-  s = s.replace(/^[.\-_]+/, '');                     // no dotfiles, no leading '-'
   if (s.length > 96) {                               // keep the extension
     const e = extOf(s);
     s = s.slice(0, e ? 96 - e.length - 1 : 96) + (e ? '.' + e : '');
   }
+  // Collapse AFTER the length cap, not before.
+  //
+  // Axiom found this reading the function as an adversary: truncating a long
+  // name can land the cut on a dot, and re-appending the extension then
+  // MANUFACTURES a '..' the earlier collapse had already removed.
+  // `'a'.repeat(91) + '.' + 'b'.repeat(30) + '.png'` came back as `aaa…aaa..png`.
+  //
+  // Not traversal — path.join keeps a two-dot FILENAME inside the directory and
+  // it never becomes a '..' path SEGMENT. But the comment claimed no '..' could
+  // survive, and an invariant a caller might one day trust has to be true rather
+  // than nearly true. Reproduced before fixing.
+  s = s.replace(/\.{2,}/g, '.');                     // no '..' can survive
+  s = s.replace(/^[.\-_]+/, '');                     // no dotfiles, no leading '-'
   return s || 'file';
 }
 

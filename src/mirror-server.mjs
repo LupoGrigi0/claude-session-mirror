@@ -709,8 +709,20 @@ const server = http.createServer(async (req, res) => {
       'Content-Type': files.contentType(base),
       'Content-Length': size,
       'X-Content-Type-Options': 'nosniff',
+      // Strip CR/LF and control characters HERE, not only upstream.
+      //
+      // Axiom's finding: this line stripped quotes and backslashes, and was safe
+      // from header injection only because safeName() had already removed
+      // control characters several layers earlier. Correct today, and correct
+      // for a reason that does not live at the point of use — so any future path
+      // that serves a name from a less-sanitised source turns this line into
+      // header injection, silently.
+      //
+      // That is the exact defect class this project keeps finding: a protection
+      // that holds because of an invariant somewhere else. Enforce it locally.
       'Content-Disposition':
-        `${isInlineImage(base) ? 'inline' : 'attachment'}; filename="${base.replace(/["\\]/g, '')}"`,
+        `${isInlineImage(base) ? 'inline' : 'attachment'}; `
+        + `filename="${base.replace(/["\\]/g, '').replace(/[\u0000-\u001f\u007f]/g, '')}"`,
       'Cache-Control': 'private, max-age=300',
     });
     // Streamed: a 25 MB readFileSync would block the loop that is watching a mind.
