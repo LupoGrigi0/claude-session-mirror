@@ -1360,6 +1360,14 @@ setInterval(async () => {
     if (!settings.hidden) refreshSettings();
     // A process running code older than the files it serves will hand out
     // buttons whose endpoints do not exist. Say so, loudly, in the header.
+    // A warning must TRACK the condition, not merely announce it once.
+    //
+    // This was added and never removed, so after the restart that fixed the
+    // problem it kept insisting the problem was there — Lupo was looking at a
+    // red banner while restart_required was already false. A signal that stays
+    // red after the fix teaches people to ignore red, which costs more than the
+    // warning was ever worth.
+    if (!h.version?.restart_required) document.getElementById('stalebar')?.remove();
     if (h.version?.restart_required && !document.getElementById('stalebar')){
       const b = document.createElement('div');
       b.id = 'stalebar';
