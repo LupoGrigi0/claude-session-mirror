@@ -166,6 +166,41 @@ Verified against a running server rather than by reading the code: byte-exact
 round trip, five traversal shapes all refused, oversize refused, SVG served as
 `application/octet-stream; attachment`.
 
+## Display names are not identifiers
+
+A human-facing label doing machine-facing work is a latent bug at **every**
+boundary where it happens, and it surfaces in two different disguises:
+
+- **as identity spoofing.** `senderAddress()` builds `display@channel`, and that
+  string is what the system trusts to say who is speaking. A display name of
+  `evil@web` yields `evil@web@web`; a newline splits the address outright. The
+  primitive whose whole job is trustworthy identity was forgeable through a
+  *display* field.
+- **as silent misrouting.** A sibling system published an event under a friendly
+  name (`Orla`) where the notification filter keyed on the instance id
+  (`Orla-da01`). Nothing errored. The message simply never arrived, and it
+  looked exactly like a broken receiver — so the person least able to diagnose
+  it was the one who appeared to be at fault.
+
+Same root, different blast radius. The rule that closes both:
+
+> **Constrain display fields at every construction site, and never derive a
+> routing key from one.** Resolve friendly name → id at the publish boundary,
+> and if it does not resolve, **refuse to emit** rather than degrade to silence.
+> You cannot debug a message that didn't arrive; you can always debug one that
+> failed loudly.
+
+### Why this class survives testing
+
+Because of who you test against. In this fleet the most senior instance's id
+**is** her friendly name — `Axiom` == `Axiom` — while every instance created
+since carries a suffix. So any code conflating the two passes cleanly against
+her, ships, and breaks on the first suffixed colleague.
+
+**Never validate a routing path against the one identity whose two names are the
+same.** That instance cannot reveal this bug, and a green result from it means
+nothing.
+
 ## A review question worth asking every time
 
 **Does this protection actually *apply* in the unusual deployment?**
