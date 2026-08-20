@@ -726,9 +726,23 @@ const server = http.createServer(async (req, res) => {
 
     // Ring the instance. The absolute path is the payload that matters — it is
     // what makes the file readable with an ordinary file tool, no new verb.
+    //
+    // A FAILED DOORBELL MUST NOT LOOK LIKE A DELIVERED ONE.
+    //
+    // This used to swallow the failure into a log line and still answer
+    // ok:true. So a file could be stored, appear in the feed, and the instance
+    // never learn it existed — with the sender believing it had arrived. That
+    // is the exact shape of the bug Orla was on the receiving end of tonight:
+    // silent non-delivery, indistinguishable from success, and undebuggable
+    // from either end. Crossing's rule — fail LOUD to the sender rather than
+    // degrade to silence — applied to my own code, which turned out to need it.
+    //
+    // It also never checked r.ok, so only network errors were noticed at all;
+    // a 500 from the channel counted as a delivered notification.
+    let notified = false, notifyError = null;
     if (cfg.channelUrl) {
       try {
-        await fetch(cfg.channelUrl + '/direct-message', {
+        const nr = await fetch(cfg.channelUrl + '/direct-message', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             from: senderAddress(who),
@@ -737,14 +751,22 @@ const server = http.createServer(async (req, res) => {
             thread_id: String(cfg.threadId),
           }),
         });
+        notified = nr.ok;
+        if (!nr.ok) notifyError = `channel returned ${nr.status}`;
       } catch (err) {
-        // The file is stored and visible either way; say so rather than failing.
-        log(`upload stored but channel notify failed: ${err.message}`);
+        notifyError = err.message;
       }
+    } else {
+      notifyError = 'no channel configured on this mirror';
     }
+    if (!notified) log(`upload STORED BUT NOT ANNOUNCED (${notifyError}): ${saved.stored}`);
 
+    // ok = the file is stored (true, and worth knowing). notified = the mind
+    // was actually told. Two different facts, reported as two different fields,
+    // because collapsing them is what makes a silent failure possible.
     res.writeHead(200, {'Content-Type':'application/json'})
-       .end(JSON.stringify({ ok:true, name: saved.name, bytes: saved.bytes,
+       .end(JSON.stringify({ ok:true, notified, notify_error: notifyError,
+                             name: saved.name, bytes: saved.bytes,
                              path: saved.path, inline: saved.inline,
                              url: `${cfg.basePath}/file/inbox/${encodeURIComponent(saved.stored)}` }));
     return;

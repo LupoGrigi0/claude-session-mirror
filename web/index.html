@@ -207,6 +207,7 @@
   #act:not(:empty)::after{content:"·";color:var(--faint);margin:0 6px}
   #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
   /* Undo sits where the hand already is — recall is the common action. */
+  #sendstat.warn{color:var(--err);font-weight:700}
   #sendstat .undo{background:none;border:0;border-bottom:1px dotted var(--cairn);
                   color:var(--cairn);font:inherit;cursor:pointer;padding:0 1px}
   #sendstat .undo:hover{border-bottom-style:solid}
@@ -353,6 +354,7 @@
 const esc = t => String(t ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+let INSTANCE_NAME = 'the session';
 const fmtBytes = n => !Number.isFinite(n) ? '?'
   : n < 1024 ? `${n} B`
   : n < 1048576 ? `${(n/1024).toFixed(1)} KB`
@@ -1131,10 +1133,18 @@ async function upload(file){
     });
     const out = await r.json().catch(()=>({}));
     if (r.ok && out.ok){
-      // No optimistic echo: the file appears when the mirror event lands, the
-      // same way a sent message is confirmed by observation rather than claim.
-      sendStat.textContent = `sent ${out.name} (${fmtBytes(out.bytes)})`;
-      setTimeout(()=>{ if(!uploading) sendStat.textContent=''; }, 4000);
+      // "Stored" and "announced" are different facts. A file that landed but
+      // never rang the doorbell is the failure you cannot debug from either
+      // end — so it says so, and it stays on screen instead of fading.
+      if (out.notified === false){
+        sendStat.textContent = `${out.name} stored, but ${INSTANCE_NAME} was NOT notified`
+                             + (out.notify_error ? ` — ${out.notify_error}` : '');
+        sendStat.classList.add('warn');
+      } else {
+        sendStat.classList.remove('warn');
+        sendStat.textContent = `sent ${out.name} (${fmtBytes(out.bytes)})`;
+        setTimeout(()=>{ if(!uploading) sendStat.textContent=''; }, 4000);
+      }
     } else if (r.status === 413){
       sendStat.textContent = `too large: ${label} is ${fmtBytes(file.size)}, limit is ${fmtBytes(out.limit_bytes)}`;
     } else {
@@ -1358,6 +1368,7 @@ setInterval(async () => {
     }
     if (h.limits?.max_upload_bytes)
       document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
+    INSTANCE_NAME = h.instance || INSTANCE_NAME;
     const gl = h.profile?.glyph ? h.profile.glyph + ' ' : '';
     document.getElementById('title').textContent = `${gl}${h.instance} · session mirror`;
     document.title = `${gl}${h.instance} · mirror`;
