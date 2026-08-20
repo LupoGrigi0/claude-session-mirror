@@ -275,6 +275,9 @@
   .qpick{color:var(--fg);font-weight:700}
   #stalebar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--err);
             color:#12131c;font:12px/1.4 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
+  /* a render failure must be VISIBLE — see the catch in the stream handler */
+  .renderfail{border:1px solid var(--err);border-left:3px solid var(--err);border-radius:8px;
+              background:#241c22;color:var(--err);font:11.5px/1.5 var(--mono);padding:8px 11px}
   .empty{color:var(--faint);text-align:center;padding:60px 20px;font-style:italic}
   .empty.permsonly{font-style:normal;max-width:520px;margin:0 auto;text-align:left;
                    line-height:1.65;color:var(--dim);border:1px solid var(--line);
@@ -462,6 +465,7 @@ function prepend(nodes){
   window.scrollTo(0, document.body.scrollHeight - anchor);
 }
 
+let renderFailures = 0;
 let earliestSeq = null, loadingEarlier = false;
 const earlierBtn = document.getElementById('earlier');
 
@@ -733,7 +737,28 @@ es.addEventListener('mirror', e => {
     }
     if (earliestSeq === null) earliestSeq = ev.seq;
     render(ev); confirmFromStream(ev); noteActivity(ev);
-  } catch {}
+  } catch (err) {
+    // NEVER swallow this.
+    //
+    // A bare `catch {}` here meant a render failure made an event vanish with
+    // no trace anywhere: not in the feed, not in the console, not in /health.
+    // When a card failed to appear, the only honest answer available to me was
+    // "I have verified every link except the one inside your browser" — and the
+    // reason I couldn't see it was this line.
+    //
+    // That is the same degrade-to-silence I spent today fixing in the upload
+    // doorbell, sitting in my own client, hiding the evidence for the bug I was
+    // trying to diagnose. A viewer must be able to SEE that something failed.
+    renderFailures++;
+    console.error('[mirror] failed to render event', err, e.data?.slice?.(0, 400));
+    try {
+      const d = document.createElement('div');
+      d.className = 'renderfail ev';
+      d.textContent = `an event could not be displayed (${err && err.message || err}) `
+                    + `— it is in the log; this is a bug in the page, not lost data`;
+      add(d);
+    } catch { /* the feed itself is broken; the console line above still stands */ }
+  }
 });
 es.addEventListener('overflow', () => { stat.textContent = 'overflowed — reconnecting'; });
 es.addEventListener('resync', () => {
@@ -1418,7 +1443,8 @@ setInterval(async () => {
     const busy = h.last_event_age_s !== null && h.last_event_age_s < 45;
     stopBtn.classList.toggle('show', Boolean(h.write_path?.interrupt) && busy);
     const age = h.last_event_age_s;
-    stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`;
+    stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`
+                     + (renderFailures ? ` · ${renderFailures} FAILED TO RENDER` : '');
     // Liveness is judged from event age, never from ok:true — /health has
     // returned ok through a total outage before.
     dot.className = 'dot ' + (age === null || age > 900 ? 'stale' : 'live');
