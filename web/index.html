@@ -273,6 +273,11 @@
   .qlabel{color:var(--human);font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.5px}
   .qq{color:var(--faint);overflow-wrap:anywhere}
   .qpick{color:var(--fg);font-weight:700}
+  #oldpage{position:fixed;left:0;right:0;bottom:0;z-index:29;background:var(--tool);
+           color:#12131c;font:12px/1.5 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
+  #oldpage code{background:rgba(0,0,0,.18);color:#12131c}
+  #oldpage button{margin-left:8px;border:0;border-radius:6px;padding:3px 12px;
+                  background:#12131c;color:var(--tool);font:inherit;cursor:pointer}
   #stalebar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--err);
             color:#12131c;font:12px/1.4 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
   /* a render failure must be VISIBLE — see the catch in the stream handler */
@@ -707,6 +712,20 @@ const MODE = '__MIRROR_MODE__';
 // Publishing and input are ORTHOGONAL: a mirror can withhold the transcript and
 // still accept messages. That combination is what a root session wants.
 const CAN_SEND = '__MIRROR_SEND__' === 'true';
+
+// The build this PAGE was served from — stamped at load, never updated.
+//
+// The stale-code banner tells you when the SERVER's files changed underneath a
+// running process. It says nothing about the opposite and equally silent case:
+// a TAB left open for hours, running a page from before a feature existed,
+// against a server that has it.
+//
+// That is exactly what happened with the first AskUserQuestion card. I verified
+// the transcript, the normalizer, the event log, the SSE stream, the renderer,
+// and that the SERVED page contained it — every link except which version of
+// the page the browser was actually running. A reload fixed it, and nothing
+// anywhere could have told either of us that a reload was what was needed.
+const PAGE_BUILD = '__MIRROR_BUILD__';
 const clientParams = new URLSearchParams({
   vw: String(window.innerWidth), vh: String(window.innerHeight),
   dpr: String(window.devicePixelRatio || 1),
@@ -1385,6 +1404,24 @@ setInterval(async () => {
     if (!settings.hidden) refreshSettings();
     // A process running code older than the files it serves will hand out
     // buttons whose endpoints do not exist. Say so, loudly, in the header.
+    // The page has outlived the server it was served from. Same failure family
+    // as restart_required, pointed the other way: there, the process is behind
+    // its files; here, the tab is behind the process.
+    const serverBuild = h.version?.commit;
+    if (serverBuild && PAGE_BUILD !== 'unknown' && serverBuild !== PAGE_BUILD){
+      if (!document.getElementById('oldpage')){
+        const b = document.createElement('div');
+        b.id = 'oldpage';
+        b.innerHTML = `this page was loaded from an older build `
+          + `(<code>${esc(PAGE_BUILD)}</code> \u2192 server is <code>${esc(serverBuild)}</code>) `
+          + `\u2014 <button id="reloadnow">reload</button> to get features added since`;
+        document.body.appendChild(b);
+        document.getElementById('reloadnow').addEventListener('click', () => location.reload());
+      }
+    } else {
+      document.getElementById('oldpage')?.remove();
+    }
+
     // A warning must TRACK the condition, not merely announce it once.
     //
     // This was added and never removed, so after the restart that fixed the

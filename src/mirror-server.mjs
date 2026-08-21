@@ -1141,7 +1141,10 @@ const server = http.createServer(async (req, res) => {
                  // isn't one. The server-side gates are the actual control; this
                  // only makes the page tell the truth from the first paint.
                  .replace('__MIRROR_MODE__', cfg.mode)
-                 .replace('__MIRROR_SEND__', String(cfg.allowSend));
+                 .replace('__MIRROR_SEND__', String(cfg.allowSend))
+                 // The page carries the build it was SERVED from, so it can
+                 // notice when it has outlived the server it came from.
+                 .replace('__MIRROR_BUILD__', String(bootCommit || 'unknown'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
     } catch (err) {
       res.writeHead(500).end(`cannot read web/index.html: ${err.message}`);
