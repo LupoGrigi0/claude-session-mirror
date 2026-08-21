@@ -145,10 +145,44 @@ export function detectSystemInjection(raw) {
  */
 export function detectQuestionAnswer(raw) {
   const t = String(raw ?? '');
-  if (!/^Your questions have been answered:/.test(t)) return null;
-  const picks = [...t.matchAll(/"([^"]+)"="([^"]+)"/g)]
-    .map(m => ({ question: m[1], answer: m[2] }));
-  return picks.length ? { picks } : null;
+
+  // TWO known prefixes, and a fallback for the next one.
+  //
+  //   2026-08-12  Your questions have been answered: "Q"="A" selected preview: …
+  //   2026-08-21  The user answered: "Q"=(no option selected) notes: …
+  //
+  // I wrote this against the FIRST sample — the only one that existed — and it
+  // silently stopped matching when the wording changed, so Lupo's answers
+  // rendered as an anonymous "result" card and his NOTES, which carried all of
+  // the actual reasoning, were never surfaced at all.
+  //
+  // normalizer.mjs's own header says this format is internal and unstable and
+  // that parsers break on any release. I documented the risk and then wrote a
+  // parser that took it anyway. So: match what we know, and when we do not
+  // recognise the shape, say so VISIBLY rather than falling through to silence.
+  const KNOWN = /^\s*(?:Your questions have been answered:|The user answered:)/;
+  if (!KNOWN.test(t)) {
+    // Unrecognised, but clearly an answer — surface it rather than hide it.
+    if (/^\s*The user (?:answered|responded|selected)/.test(t)) {
+      return { picks: [], raw: t.trim(), unrecognised: true };
+    }
+    return null;
+  }
+
+  // "question"="answer", where the answer may be (no option selected).
+  const picks = [...t.matchAll(/"([^"]+)"=(?:"([^"]*)"|\(([^)]*)\))/g)].map(m => ({
+    question: m[1],
+    answer: m[2] !== undefined ? m[2] : `(${m[3]})`,
+  }));
+
+  // notes: — new in the 2026-08-21 format, and the field that carries the
+  // substance when someone types rather than picks. Runs to the next
+  // "question"= pair or the end.
+  const notes = [...t.matchAll(/notes:\s*([\s\S]*?)(?=(?:,\s*"[^"]+"=)|$)/g)]
+    .map(m => m[1].trim()).filter(Boolean);
+  for (let i = 0; i < picks.length && i < notes.length; i++) picks[i].notes = notes[i];
+
+  return picks.length ? { picks } : { picks: [], raw: t.trim(), unrecognised: true };
 }
 
 export function detectSlashCommand(raw) {
@@ -302,8 +336,11 @@ export function normalizeEntry(entry, ctx = {}) {
       events.push({ ...base, index, type: 'question',
         from: { id: ctx.speaker?.id || 'user', kind: ctx.speaker?.kind || 'human',
                 display: ctx.speaker?.display || 'User' },
-        body: { tool_use_id: block.tool_use_id || null,
-                answered: detectQuestionAnswer(raw).picks } });
+        body: (() => { const a = detectQuestionAnswer(raw);
+                       return { tool_use_id: block.tool_use_id || null,
+                                answered: a.picks,
+                                unrecognised: Boolean(a.unrecognised),
+                                raw: a.raw || null }; })() });
     } else if (bt === 'tool_result') {
       // Tool results arrive inside `user`-role entries — that is an API
       // convention (results are fed back as user turns), NOT a speaker. The

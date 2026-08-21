@@ -273,6 +273,9 @@
   .qlabel{color:var(--human);font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.5px}
   .qq{color:var(--faint);overflow-wrap:anywhere}
   .qpick{color:var(--fg);font-weight:700}
+  .qnotes{margin-top:6px;padding-left:10px;border-left:2px solid var(--line);
+          color:var(--dim);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+  .qcard.unrec{border-color:var(--tool);border-left-color:var(--tool)}
   #oldpage{position:fixed;left:0;right:0;bottom:0;z-index:29;background:var(--tool);
            color:#12131c;font:12px/1.5 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
   #oldpage code{background:rgba(0,0,0,.18);color:#12131c}
@@ -628,7 +631,15 @@ function render(ev, quiet){
       d.innerHTML = b.answered.map(a =>
         `<div class="qa"><span class="qlabel">answered</span> `
       + `<span class="qq">${esc(a.question)}</span> `
-      + `<span class="qpick">${esc(a.answer)}</span></div>`).join('');
+      + `<span class="qpick">${esc(a.answer)}</span></div>`
+      // notes carry the substance when someone types instead of picking
+      + (a.notes ? `<div class="qnotes">${esc(a.notes)}</div>` : '')).join('');
+      if (b.unrecognised){
+        d.classList.add('unrec');
+        d.innerHTML = `<div class="qa"><span class="qlabel">answered</span>`
+          + `<span class="qq">(format not recognised \u2014 shown raw)</span></div>`
+          + `<pre>${esc(b.raw || '')}</pre>`;
+      }
       add(d); return;
     }
     // Render the OFFERED options. Never a fixed set of buttons — Anthropic omits

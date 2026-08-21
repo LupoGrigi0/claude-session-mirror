@@ -1116,7 +1116,27 @@ const server = http.createServer(async (req, res) => {
     if (pending.length) { try { client.res.write(ephemeralFrame(permissionsEvent())); } catch { /* gone */ } }
     log(`client attached (from seq ${afterSeq}); ${clients.size} total`);
 
-    req.on('close', () => { clients.delete(client); stats.clients = clients.size; });
+    // LOG THE DETACH, not just the attach.
+    //
+    // Attaches were logged and detaches silently decremented a counter, so
+    // "was the browser connected when that event fired?" was unanswerable from
+    // the log — which is exactly the question that blocked diagnosing the
+    // plan-mode test. Observability built in one direction, and the missing
+    // half was the half that mattered.
+    //
+    // Note what this can and cannot tell you: a closed tab or a reload appears
+    // immediately, because the socket closes. A network drop does NOT — the
+    // server only learns when a write fails or TCP finally gives up, which can
+    // be minutes. The 15s SSE ping is what eventually surfaces it. There is no
+    // idle-timeout disconnect; nothing here drops a client for being quiet.
+    const attachedAt = Date.now();
+    req.on('close', () => {
+      clients.delete(client);
+      stats.clients = clients.size;
+      const secs = Math.round((Date.now() - attachedAt) / 1000);
+      log(`client DETACHED after ${secs}s (${client.info?.platform || 'unknown'}`
+        + `${client.info?.viewport ? ' ' + client.info.viewport : ''}); ${clients.size} remain`);
+    });
     return;
   }
 
