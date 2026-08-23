@@ -172,6 +172,32 @@ log(`instance=${cfg.instance} epoch=${eventLog.epoch} resuming from seq=${eventL
 const files = new FileStore(cfg.dataDir);
 log(`files: inbox=${files.inbox} outbox=${files.outbox} (${files.primeOutbox()} already present, not re-announced)`);
 
+// --- outbound journal --------------------------------------------------------
+// The last-resort copy of what a human typed. Append-only, never read back by
+// the server, never served over HTTP — it exists purely so that "I spent ten
+// minutes writing that" is a recoverable situation instead of a lost one.
+//
+// Deliberately NOT the event log: an event is something that happened, and a
+// message we could not confirm delivery of has not happened yet. Mixing the two
+// is how you get a feed that shows messages the mind never received.
+const sendJournal = path.join(cfg.dataDir, 'sent.jsonl');
+function journalSend(who, text, nonce) {
+  try {
+    fs.appendFileSync(sendJournal, JSON.stringify({
+      at: new Date().toISOString(),
+      from: senderAddress(who),
+      source: who.source,
+      nonce,
+      text,
+    }) + '\n', { mode: 0o600 });
+  } catch (err) {
+    // Never fail a send because the safety net failed — but say so loudly,
+    // because from here on the browser is the only copy again.
+    log(`WARNING: could not journal outbound message (${err.message}) ` +
+        `— the browser now holds the only copy`);
+  }
+}
+
 // --- schema canary -----------------------------------------------------------
 // Advisory, never fatal: a renamed field should page us, not take the mirror down.
 if (cfg.mode === 'full') try {
@@ -618,6 +644,22 @@ const server = http.createServer(async (req, res) => {
     // Nonce so the UI can DERIVE delivery by watching the message reappear in
     // the mirror stream, rather than asking the instance anything (Law 9.1).
     const nonce = `${Date.now().toString(36)}-${stats.hooks}-${eventLog.seq}`;
+
+    // Journal the text BEFORE handing it downstream, and keep it regardless of
+    // what happens next.
+    //
+    // On 2026-08-23 Lupo spent ten minutes composing a message to Crossing. It
+    // was accepted (200), forwarded (200), and never reached the mind. Then he
+    // refreshed the page and it ceased to exist anywhere on this machine:
+    // channel.mjs performs ZERO filesystem writes (verified: grep count 0), the
+    // mirror logged only the sender and status, and the browser held the sole
+    // copy in a JS array. Three components each reasonably assumed someone else
+    // was keeping it. Nobody was.
+    //
+    // A human's unrecoverable words are worth more than the bytes. 0600 because
+    // the event log beside it is 0664 and this is the one file that holds text
+    // which may never have reached its recipient.
+    journalSend(who, text, nonce);
 
     try {
       const r = await fetch(cfg.channelUrl + '/direct-message', {

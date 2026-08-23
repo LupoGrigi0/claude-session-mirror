@@ -809,11 +809,39 @@ const sendStat = document.getElementById('sendstat');
 const expediteBtn = document.getElementById('expedite');
 const expedol = document.getElementById('expedol');
 const DRAFT = 'mirror-draft';
-const outbox = [];    // {text, at} sent, awaiting confirmation FROM THE STREAM
-                      // (deliberately NOT called `pending` — that word means
-                      //  permission requests elsewhere, and confusing the two
-                      //  would be a bad day)
+const OUTBOX = 'mirror-outbox';
+const HELD   = 'mirror-held';   // text inside the recall countdown, not yet sent
+
+// {text, at} sent, awaiting confirmation FROM THE STREAM.
+// (deliberately NOT called `pending` — that word means permission requests
+//  elsewhere, and confusing the two would be a bad day)
+//
+// PERSISTED, and that is the whole point. This was a plain in-memory array
+// until 2026-08-23, when Lupo spent ten minutes writing to Crossing, the
+// message was accepted but never delivered, and he refreshed the page. The
+// array was the last copy of his words and the refresh destroyed it.
+//
+// The rule this encodes: text a human typed is released ONLY when we have seen
+// it come back out of the session. Not when it was accepted, not when it was
+// forwarded — accepted and forwarded are exactly what happened that night.
+let outbox = [];
+try { outbox = JSON.parse(localStorage.getItem(OUTBOX) || '[]'); } catch { outbox = []; }
+if (!Array.isArray(outbox)) outbox = [];
+function saveOutbox(){
+  try { localStorage.setItem(OUTBOX, JSON.stringify(outbox)); } catch { /* quota */ }
+}
 let inFlight = false;
+
+// A page that died mid-countdown left text in HELD that was NEVER sent. Merge
+// it back ahead of any draft, in the order it was written, and drop the key —
+// silently, because nothing went wrong from the human's point of view: they
+// typed something and here it is.
+const heldOnLoad = localStorage.getItem(HELD);
+if (heldOnLoad){
+  const d = localStorage.getItem(DRAFT) || '';
+  localStorage.setItem(DRAFT, d.trim() ? heldOnLoad + '\n\n' + d : heldOnLoad);
+  localStorage.removeItem(HELD);
+}
 
 input.value = localStorage.getItem(DRAFT) || '';
 function resize(){
@@ -1036,6 +1064,7 @@ function cancelPending(){
   pending = null;
   input.value = text;                     // handed back exactly as written
   localStorage.setItem(DRAFT, text);
+  localStorage.removeItem(HELD);          // custody returns to the draft
   resize(); refresh(); paintPending();
   sendStat.textContent = 'recalled — not sent';
   setTimeout(() => { if (!pending) sendStat.textContent = ''; }, 2500);
@@ -1052,6 +1081,11 @@ function queueSend(){
   // A second Send while one is queued means "and also this" — flush the first
   // immediately so the session receives them in the order they were written.
   if (pending) flushPending();
+  // Custody passes draft -> HELD -> outbox, and the text is in localStorage at
+  // every instant of that chain. The recall window is short, but "short" is not
+  // "safe": a crash or a reflexive refresh mid-countdown used to lose the text
+  // outright, because `pending` was memory-only just like the outbox was.
+  localStorage.setItem(HELD, text);
   input.value = ''; localStorage.removeItem(DRAFT); resize(); refresh();
   const ms = sendDelayMs(text);
   pending = { text, at: Date.now(), ms, timer: null, tick: null };
@@ -1065,6 +1099,7 @@ function flushPending(){
   clearTimeout(pending.timer); clearInterval(pending.tick);
   const { text } = pending;
   pending = null;
+  localStorage.removeItem(HELD);   // send() takes custody via the outbox
   paintPending();
   send(text);
 }
@@ -1109,6 +1144,14 @@ window.addEventListener('pagehide', () => {
   const { text } = pending;
   clearTimeout(pending.timer); clearInterval(pending.tick);
   pending = null;
+  // A closing page cannot read the response, so this send can NEVER be
+  // confirmed here. Move custody into the persisted outbox rather than clearing
+  // HELD: the next load then shows it as unconfirmed with the text recoverable,
+  // which is the honest state. Assuming it arrived is the mistake that started
+  // all of this.
+  outbox.push({ text, at: Date.now() });
+  saveOutbox();
+  localStorage.removeItem(HELD);
   try {
     fetch(BASE + '/send', { method:'POST', headers:{'Content-Type':'application/json'},
                             body: JSON.stringify({ text }), keepalive: true });
@@ -1142,9 +1185,17 @@ async function send(queuedText){
     const out = await r.json().catch(()=>({}));
     if (r.ok && out.ok){
       outbox.push({ text, at: Date.now() });
+      saveOutbox();
       // NOTE: "delivered" is DERIVED by watching the message reappear in the
       // mirror stream. We never ask the instance to confirm anything (Law 9.1).
+      //
+      // That derivation is the ONLY honest signal available: the channel's 200
+      // resolves when a JSON-RPC notification is written to the transport, and
+      // a notification has no reply by definition. So an accepted send tells us
+      // nothing about arrival, and this status must not imply that it does.
       sendStat.textContent = 'queued — waiting for it to land in the session';
+      sendStat.classList.remove('warn');
+      armOverdue();
     } else {
       restoreUnsent(text);
       sendStat.textContent = `not sent: ${out.error || r.status}`;
@@ -1254,11 +1305,59 @@ function confirmFromStream(ev){
     if (body.includes(outbox[i].text.slice(0, 60))){
       const ms = Date.now() - outbox[i].at;
       outbox.splice(i,1);
+      saveOutbox();                        // released only now — see OUTBOX
+      sendStat.classList.remove('warn');
       sendStat.textContent = `delivered to the session (${ms} ms)`;
       setTimeout(()=>{ if(!outbox.length) sendStat.textContent=''; }, 4000);
     }
   }
 }
+
+// --- overdue sends -----------------------------------------------------------
+// A send that is never confirmed used to sit under a quiet grey "queued…" for
+// as long as the tab stayed open. Silence is the wrong signal for the failure
+// it was actually reporting: Lupo read "waiting for it to land", reasonably
+// took it for progress, and walked away from a message that was already gone.
+//
+// Nothing here retries. Re-sending a message whose delivery we genuinely cannot
+// determine risks saying everything twice — the mind may have received it and
+// simply not answered yet. Tell the human plainly and let them decide.
+const OVERDUE_MS = 60000;
+let overdueTimer = null;
+
+function armOverdue(){
+  clearTimeout(overdueTimer);
+  if (!outbox.length) return;
+  const oldest = Math.min(...outbox.map(o => o.at));
+  overdueTimer = setTimeout(paintOverdue, Math.max(1000, OVERDUE_MS - (Date.now() - oldest)));
+}
+
+function paintOverdue(){
+  if (!outbox.length) return;
+  const n = outbox.length;
+  sendStat.classList.add('warn');
+  sendStat.innerHTML =
+    `${n} message${n>1?'s':''} accepted but NEVER seen arriving in the session — `
+    + `<button class="undo" id="recover">put the text back</button>`;
+  document.getElementById('recover').addEventListener('click', recoverOutbox);
+}
+
+/** Hand every unconfirmed message back to the composer, newest last. */
+function recoverOutbox(){
+  if (!outbox.length) return;
+  const texts = outbox.map(o => o.text);
+  outbox = []; saveOutbox();
+  clearTimeout(overdueTimer);
+  restoreUnsent(texts.join('\n\n'));
+  sendStat.classList.remove('warn');
+  sendStat.textContent = 'text returned to the composer — nothing was re-sent';
+  input.focus();
+}
+
+// On load: if a previous page died holding unconfirmed text, say so IMMEDIATELY
+// and offer it back. This is the case that lost ten minutes of Lupo's writing —
+// the old code kept the only copy in a JS array, so a refresh was fatal.
+if (outbox.length) paintOverdue();
 
 // --- permission cards --------------------------------------------------------
 // Requirements from Bastion, who nearly caused a real incident testing this:
