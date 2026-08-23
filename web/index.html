@@ -755,6 +755,14 @@ es.addEventListener('mirror', e => {
       if (ev.ephemeral) renderPermissions(ev.body?.pending);
       return;
     }
+    if (ev.type === 'channel_state'){
+      // The server derived this by watching sends fail to come back out. It is
+      // pushed to EVERY viewer, not just whoever sent — a channel that has gone
+      // deaf is a fact about the mind, not about one browser tab. Ephemeral, so
+      // a stale "deaf" never replays out of the log as if it were current.
+      if (ev.ephemeral) renderChannelState(ev.body);
+      return;
+    }
     if (ev.type === 'window_start'){
       // The server sent a bounded tail, not the whole log. Say so honestly
       // rather than letting a partial view look complete.
@@ -1358,6 +1366,23 @@ function recoverOutbox(){
 // and offer it back. This is the case that lost ten minutes of Lupo's writing —
 // the old code kept the only copy in a JS array, so a refresh was fatal.
 if (outbox.length) paintOverdue();
+
+/** The server has decided the channel is or isn't carrying messages. */
+function renderChannelState(b){
+  if (b?.deaf){
+    // Deliberately NOT phrased as "the mind is down". It may be perfectly awake
+    // and simply unreachable — which is exactly what happened to Crossing, who
+    // was answering the terminal the whole time messages were vanishing.
+    sendStat.classList.add('warn');
+    sendStat.textContent =
+      `${INSTANCE_NAME} is not receiving messages — ${b.unconfirmed} accepted by the `
+      + `channel, none seen arriving (oldest ${b.oldest_s}s). Text you send is kept.`;
+  } else if (sendStat.classList.contains('warn') && !outbox.length){
+    sendStat.classList.remove('warn');
+    sendStat.textContent = 'channel is answering again';
+    setTimeout(()=>{ if(!outbox.length) sendStat.textContent=''; }, 4000);
+  }
+}
 
 // --- permission cards --------------------------------------------------------
 // Requirements from Bastion, who nearly caused a real incident testing this:

@@ -180,6 +180,74 @@ log(`files: inbox=${files.inbox} outbox=${files.outbox} (${files.primeOutbox()} 
 // Deliberately NOT the event log: an event is something that happened, and a
 // message we could not confirm delivery of has not happened yet. Mixing the two
 // is how you get a feed that shows messages the mind never received.
+// --- is anyone actually listening? -------------------------------------------
+// On 2026-08-23 Crossing's channel accepted three messages from three different
+// transports, answered {"ok":true} to every health check, and delivered none of
+// them. Its /health returns `ok: true` as a hardcoded literal, and a JSON-RPC
+// notification has no reply, so NOTHING upstream could tell.
+//
+// The mirror is the only component on this machine that sees both sides: it
+// posts to the channel AND tails the transcript the session writes. So it is
+// the only thing that can answer "did that actually arrive" — not by asking
+// anyone (Law 9.1), purely by watching for the message to come back out.
+//
+// This is the same derivation the browser does, moved server-side for the two
+// reasons that matter: it survives the tab closing, and it tells EVERY viewer
+// the channel is deaf rather than only the person who happened to send.
+// Overridable ONLY so the test can prove the announcement actually fires. A
+// suite that waits 90s gets skipped, and a threshold nobody exercises is a
+// threshold nobody knows is wired up — that mistake has been made here before
+// (a test appended after process.exit() that never ran and looked identical).
+const DEAF_AFTER_MS = Number(process.env.MIRROR_DEAF_AFTER_MS) || 90000;
+const DEAF_POLL_MS  = Math.min(15000, Math.max(500, Math.round(DEAF_AFTER_MS / 3)));
+const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
+let lastConfirmedAt = null;
+let deafAnnounced = false;
+
+/** Watch our own sends come back out of the session. */
+function confirmDelivery(ev) {
+  if (!awaitingConfirm.length || ev.type !== 'user_message') return;
+  const body = ev.body?.text || '';
+  for (let i = awaitingConfirm.length - 1; i >= 0; i--) {
+    if (body.includes(awaitingConfirm[i].probe)) {
+      const ms = Date.now() - awaitingConfirm[i].at;
+      awaitingConfirm.splice(i, 1);
+      lastConfirmedAt = Date.now();
+      log(`delivery CONFIRMED after ${ms} ms (${awaitingConfirm.length} still unconfirmed)`);
+      if (deafAnnounced && !awaitingConfirm.length) {
+        deafAnnounced = false;
+        log('channel is answering again');
+        broadcastEphemeral({ type: 'channel_state', body: { deaf: false } });
+      }
+    }
+  }
+}
+
+/** Oldest unconfirmed send, in ms, or null. Recomputed, never cached. */
+function oldestUnconfirmedMs() {
+  if (!awaitingConfirm.length) return null;
+  return Date.now() - Math.min(...awaitingConfirm.map(a => a.at));
+}
+
+// Deliberately a poll rather than a per-send timer: the interesting question is
+// "is the channel deaf RIGHT NOW", and that has to keep being asked after the
+// sender has gone away. Unref'd so it can never hold the process open during a
+// shutdown — SIGTERM hanging on a stray handle has bitten here before.
+setInterval(() => {
+  const oldest = oldestUnconfirmedMs();
+  if (oldest !== null && oldest > DEAF_AFTER_MS && !deafAnnounced) {
+    deafAnnounced = true;
+    log(`WARNING: ${awaitingConfirm.length} message(s) accepted by the channel `
+      + `but NEVER seen arriving in the session (oldest ${Math.round(oldest/1000)}s). `
+      + `The channel reports healthy; that is not evidence.`);
+    broadcastEphemeral({
+      type: 'channel_state',
+      body: { deaf: true, unconfirmed: awaitingConfirm.length,
+              oldest_s: Math.round(oldest / 1000) },
+    });
+  }
+}, DEAF_POLL_MS).unref();
+
 const sendJournal = path.join(cfg.dataDir, 'sent.jsonl');
 function journalSend(who, text, nonce) {
   try {
@@ -328,6 +396,7 @@ const tailer = cfg.mode !== 'full' ? null : new TranscriptTailer({
       const stored = eventLog.append(ev);
       stats.events++;
       stats.lastEventAt = Date.now();
+      confirmDelivery(stored);
       broadcast(stored);
     }
   },
@@ -674,6 +743,10 @@ const server = http.createServer(async (req, res) => {
         }),
       });
       const out = await r.json().catch(() => ({}));
+      // Start watching for it to come back out. 60 chars is enough to be unique
+      // in practice and short enough to survive any wrapper the chassis adds
+      // around the text on its way in.
+      if (r.ok) awaitingConfirm.push({ probe: text.slice(0, 60), at: Date.now(), nonce });
       const ci = describeClient(req, url);
       log(`send from ${senderAddress(who)} [${who.source}] `
         + `via ${ci.platform}${ci.mobile ? '/mobile' : ''}`
@@ -1105,6 +1178,16 @@ const server = http.createServer(async (req, res) => {
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
         may_write: mayWrite(resolveIdentity(req)),
+        // DERIVED, never asserted. The channel's own /health cannot report this
+        // — it answers ok:true from a literal and has no way to know whether the
+        // session consumed anything. These three fields are the only evidence on
+        // this machine that messages are actually arriving.
+        unconfirmed: awaitingConfirm.length,
+        oldest_unconfirmed_s: oldestUnconfirmedMs() === null
+          ? null : Math.round(oldestUnconfirmedMs() / 1000),
+        channel_appears_deaf: deafAnnounced,
+        last_confirmed_delivery: lastConfirmedAt
+          ? new Date(lastConfirmedAt).toISOString() : null,
       },
     }, null, 2));
     return;
