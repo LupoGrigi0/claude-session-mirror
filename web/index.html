@@ -205,12 +205,27 @@
   table.cheat code{font-size:11px}
   #act{color:var(--cairn)}
   #act:not(:empty)::after{content:"·";color:var(--faint);margin:0 6px}
-  #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);color:var(--faint);height:14px}
+  /* min-height, not height: a fixed 14px silently CLIPS a warning that wraps to
+     two lines, and the warnings are exactly the messages that run long. */
+  #sendstat{max-width:920px;margin:4px auto 0;font:11px var(--mono);
+            color:var(--faint);min-height:14px}
   /* Undo sits where the hand already is — recall is the common action. */
-  #sendstat.warn{color:var(--err);font-weight:700}
+  #sendstat.warn{color:var(--err);font-weight:700;line-height:1.7}
   #sendstat .undo{background:none;border:0;border-bottom:1px dotted var(--cairn);
                   color:var(--cairn);font:inherit;cursor:pointer;padding:0 1px}
   #sendstat .undo:hover{border-bottom-style:solid}
+  /* A recovery control is not an undo link.
+     Lupo's screenshot of the first real save, 2026-08-23: the warning fired
+     correctly during an ISP outage, and "put the text back" was the QUIETEST
+     thing on screen — a small dotted underline, on the one occasion the human
+     is scanning fast because something has already gone wrong.
+     Prominence should track the stakes of the moment a control appears in, not
+     how often it gets used. Same reasoning that put expedite up by the name. */
+  #sendstat .rescue{background:var(--err);color:#12131c;border:0;border-radius:6px;
+                    font:700 11px var(--mono);cursor:pointer;padding:4px 10px;
+                    margin-left:8px;white-space:nowrap}
+  #sendstat .rescue:hover{filter:brightness(1.15)}
+  #sendstat .rescue:focus-visible{outline:2px solid var(--cairn);outline-offset:2px}
   /* Expedite sits by the NAME, deliberately far from Send: skipping the recall
      window should take a second thought and a second action, not a fast tap in
      the same place the first one landed. */
@@ -1345,8 +1360,8 @@ function paintOverdue(){
   const n = outbox.length;
   sendStat.classList.add('warn');
   sendStat.innerHTML =
-    `${n} message${n>1?'s':''} accepted but NEVER seen arriving in the session — `
-    + `<button class="undo" id="recover">put the text back</button>`;
+    `${n} message${n>1?'s':''} accepted but NEVER seen arriving in the session`
+    + `<button class="rescue" id="recover">put the text back</button>`;
   document.getElementById('recover').addEventListener('click', recoverOutbox);
 }
 
