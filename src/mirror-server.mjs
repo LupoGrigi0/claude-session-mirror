@@ -221,6 +221,10 @@ log(`files: inbox=${files.inbox} outbox=${files.outbox} (${files.primeOutbox()} 
 // (a test appended after process.exit() that never ran and looked identical).
 const DEAF_AFTER_MS = Number(process.env.MIRROR_DEAF_AFTER_MS) || 90000;
 const DEAF_POLL_MS  = Math.min(15000, Math.max(500, Math.round(DEAF_AFTER_MS / 3)));
+// How long the transcript must be SILENT before an unconfirmed send counts as
+// deafness rather than backlog. Scales with the deaf threshold so the test can
+// exercise both at speed.
+const QUIET_BEFORE_DEAF_MS = Math.max(2000, Math.round(DEAF_AFTER_MS / 3));
 const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
 let lastConfirmedAt = null;
 let deafAnnounced = false;
@@ -256,6 +260,26 @@ function oldestUnconfirmedMs() {
 // shutdown — SIGTERM hanging on a stray handle has bitten here before.
 setInterval(() => {
   const oldest = oldestUnconfirmedMs();
+  // A BUSY session is not a deaf one.
+  //
+  // Crossing measured enqueue -> surface at 45 SECONDS, because an inbound
+  // message surfaces at a TURN BOUNDARY, not on arrival. So a session that is
+  // mid-turn — running agents, grinding through tools — has legitimately not
+  // surfaced the message yet, and announcing "deaf" would be a false alarm
+  // during exactly the long turns where a human is most likely to send.
+  //
+  // Tonight's own agent runs were 5 minutes. With a flat 90s threshold I would
+  // have told Lupo his message never arrived while it sat correctly queued.
+  //
+  // So: declare deaf only when unconfirmed AND the transcript has gone quiet,
+  // meaning a turn boundary has come and gone without the message appearing.
+  // The event log is the liveness signal here for the same reason /health's
+  // ok:true is not — one is observed, the other is asserted.
+  const quietMs = Date.now() - (stats.lastEventAt || 0);
+  const sessionQuiet = quietMs > QUIET_BEFORE_DEAF_MS;
+  if (oldest !== null && oldest > DEAF_AFTER_MS && !sessionQuiet && !deafAnnounced) {
+    return;   // busy, not deaf — keep waiting, say nothing
+  }
   if (oldest !== null && oldest > DEAF_AFTER_MS && !deafAnnounced) {
     deafAnnounced = true;
     log(`WARNING: ${awaitingConfirm.length} message(s) accepted by the channel `
@@ -1231,6 +1255,8 @@ const server = http.createServer(async (req, res) => {
         oldest_unconfirmed_s: oldestUnconfirmedMs() === null
           ? null : Math.round(oldestUnconfirmedMs() / 1000),
         channel_appears_deaf: deafAnnounced,
+        // Distinguishes "waiting on a busy session" from "nothing is listening".
+        session_quiet_s: Math.round((Date.now() - (stats.lastEventAt || Date.now())) / 1000),
         last_confirmed_delivery: lastConfirmedAt
           ? new Date(lastConfirmedAt).toISOString() : null,
       },

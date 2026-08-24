@@ -119,5 +119,40 @@ ok "$(h | grep -q '^\[1,' && echo 1 || echo 0)" \
    "only the message that ACTUALLY arrived was cleared $(h)"
 
 echo
+echo "7. a BUSY session is not a deaf one (Crossing: enqueue->surface = 45s)"
+# An inbound message surfaces at a TURN BOUNDARY. A session grinding through a
+# long turn has legitimately not surfaced it yet. Announcing deafness there is a
+# false alarm during exactly the long turns a human is most likely to send into.
+kill $SRV 2>/dev/null; sleep 0.5
+rm -rf "$DIR/data5"; printf '%s\n' '{"type":"summary","summary":"t"}' > "$DIR/busy.jsonl"
+MIRROR_INSTANCE=busytest MIRROR_TRANSCRIPT="$DIR/busy.jsonl" MIRROR_DATA_DIR="$DIR/data5" \
+MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT MIRROR_CHANNEL_URL="http://127.0.0.1:$CHAN" \
+MIRROR_ALLOW_SEND=1 MIRROR_DEAF_AFTER_MS=2000 \
+node "$SRC/src/mirror-server.mjs" > "$DIR/server5.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/send" \
+  -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" \
+  -d '{"text":"queued behind a long turn"}'
+# Keep the transcript moving for well past the deaf threshold, WITHOUT ever
+# writing the sent message. This is a busy session, not a deaf channel.
+for i in 1 2 3 4 5 6; do
+  cat >> "$DIR/busy.jsonl" <<EOJ
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"still working, step $i"}]},"timestamp":"2026-08-24T03:00:0$i.000Z","uuid":"busy-$i","sessionId":"s"}
+EOJ
+  sleep 0.7
+done
+BUSY=$(h)
+ok "$(echo "$BUSY" | grep -q ',false,' && echo 1 || echo 0)" "busy session NOT declared deaf $BUSY"
+ok "$(echo "$BUSY" | grep -q '^\[1,' && echo 1 || echo 0)" "and the message is still tracked as unconfirmed"
+ok "$(grep -q 'NEVER seen arriving' "$DIR/server5.log" && echo 0 || echo 1)" "no false alarm logged"
+
+echo
+echo "7b. once it goes QUIET, deafness is announced"
+sleep 3
+QUIET=$(h)
+ok "$(echo "$QUIET" | grep -q ',true,' && echo 1 || echo 0)" "silent session IS declared deaf $QUIET"
+
+echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ]
