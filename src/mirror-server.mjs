@@ -740,6 +740,20 @@ const server = http.createServer(async (req, res) => {
           from: senderAddress(who),
           text,
           thread_id: String(cfg.threadId),
+          // The channel appends "text written in your own output is NOT
+          // delivered — the reply tool is the only path back". True for every
+          // async transport, and FALSE here: this sender is reading the
+          // transcript in a browser, so ordinary output reaches them. Lupo
+          // watched me call a tool to answer a message he was already
+          // watching me write.
+          //
+          // Declared as an explicit flag rather than leaving the channel to
+          // sniff "@web" off the display name. A display name is not an
+          // identifier — that is a defect class already written into
+          // SECURITY.md, and inferring transport from it would plant another.
+          // Ignored by channels that don't know the field, so it is safe to
+          // send before anyone consumes it.
+          reply_path: 'transcript',
         }),
       });
       const out = await r.json().catch(() => ({}));
