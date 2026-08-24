@@ -128,6 +128,60 @@ for u in "/file/sent.jsonl" "/file/inbox/../sent.jsonl" "/sent.jsonl"; do
   ok "$([ "$LEAK" = "0" ] && echo 1 || echo 0)" "$u -> $CODE, no leak"
 done
 
+
+echo
+echo "8. /upload is a WRITE and needs its own grant (measured hole, 2026-08-24)"
+# Before this: a mirror started with NO grants answered /send 403 and /upload 200,
+# writing bytes into the instance's inbox. Full mode without --with-input is
+# exactly the deployment someone picks to be watched and NOT written to.
+kill $SRV 2>/dev/null; sleep 0.5
+MIRROR_INSTANCE=jtest2 MIRROR_TRANSCRIPT="$DIR/session.jsonl" MIRROR_DATA_DIR="$DIR/data2" \
+MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT \
+node "$SRC/src/mirror-server.mjs" > "$DIR/server2.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
+UP=$(curl -s -o "$DIR/up" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/upload" \
+     -H 'X-Filename: probe.txt' -H 'Content-Type: application/octet-stream' \
+     -H "Origin: http://127.0.0.1:$PORT" --data-binary 'PROBE')
+ok "$([ "$UP" = "403" ] && echo 1 || echo 0)" "ungranted mirror refuses /upload (got $UP)"
+ok "$([ ! -d "$DIR/data2/inbox" ] || [ -z "$(ls -A "$DIR/data2/inbox" 2>/dev/null)" ] && echo 1 || echo 0)" \
+   "and wrote NOTHING to disk"
+ok "$(curl -s "http://127.0.0.1:$PORT/health" | grep -q '"upload": false' && echo 1 || echo 0)" \
+   "/health reports upload: false"
+
+echo
+echo "9. granting send grants uploads — no live mirror changes behaviour"
+kill $SRV 2>/dev/null; sleep 0.5
+CHAN_PORT=$CHAN CHAN_LOG="$DIR/chan.log" node "$DIR/chan.mjs" accept & CH=$!
+sleep 0.5
+MIRROR_INSTANCE=jtest3 MIRROR_TRANSCRIPT="$DIR/session.jsonl" MIRROR_DATA_DIR="$DIR/data3" \
+MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT MIRROR_CHANNEL_URL="http://127.0.0.1:$CHAN" \
+MIRROR_ALLOW_SEND=1 \
+node "$SRC/src/mirror-server.mjs" > "$DIR/server3.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
+UP2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/upload" \
+      -H 'X-Filename: probe.txt' -H 'Content-Type: application/octet-stream' \
+      -H "Origin: http://127.0.0.1:$PORT" --data-binary 'PROBE')
+ok "$([ "$UP2" = "200" ] && echo 1 || echo 0)" "send granted -> upload accepted (got $UP2)"
+
+echo
+echo "10. and the two can still be separated deliberately"
+kill $SRV 2>/dev/null; sleep 0.5
+MIRROR_INSTANCE=jtest4 MIRROR_TRANSCRIPT="$DIR/session.jsonl" MIRROR_DATA_DIR="$DIR/data4" \
+MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT MIRROR_CHANNEL_URL="http://127.0.0.1:$CHAN" \
+MIRROR_ALLOW_SEND=1 MIRROR_ALLOW_UPLOAD=0 \
+node "$SRC/src/mirror-server.mjs" > "$DIR/server4.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
+S4=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/send" \
+     -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" -d '{"text":"still works"}')
+U4=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/upload" \
+     -H 'X-Filename: p.txt' -H 'Content-Type: application/octet-stream' \
+     -H "Origin: http://127.0.0.1:$PORT" --data-binary 'P')
+ok "$([ "$S4" = "200" ] && [ "$U4" = "403" ] && echo 1 || echo 0)" \
+   "MIRROR_ALLOW_UPLOAD=0 with send on: send $S4, upload $U4"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ]

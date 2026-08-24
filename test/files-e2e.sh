@@ -8,6 +8,12 @@
 #   4. a file dropped in outbox/ is announced on the live SSE stream
 #   5. SVG is served as a download, never as an inline image
 #   6. an upload with no X-Filename is refused
+#
+# NOTE: MIRROR_ALLOW_UPLOAD=1 is REQUIRED as of 2026-08-24. Before that date
+# /upload had no grant at all, and this suite was silently exercising an
+# ungranted mirror — it went red the moment the grant landed, which is the
+# test doing its job. The grant itself is covered in test/outbound-journal.sh
+# sections 8-10; here we only need the capability switched on.
 set -u
 DIR=$(mktemp -d)
 PORT=22099
@@ -20,6 +26,7 @@ printf '%s\n' '{"type":"summary","summary":"test"}' > "$DIR/session.jsonl"
 MIRROR_INSTANCE=e2etest MIRROR_DISPLAY=E2E \
 MIRROR_TRANSCRIPT="$DIR/session.jsonl" MIRROR_DATA_DIR="$DIR/data" \
 MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT MIRROR_MAX_UPLOAD=$((1024*1024)) \
+MIRROR_ALLOW_UPLOAD=1 \
 node "$SRC/src/mirror-server.mjs" > "$DIR/server.log" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -rf "$DIR"' EXIT

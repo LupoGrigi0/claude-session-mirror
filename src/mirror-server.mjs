@@ -91,6 +91,27 @@ cfg.allowInterrupt = process.env.MIRROR_ALLOW_INTERRUPT === '1' ? true
 // --with-input silently arriving via flag ordering.
 cfg.allowCommands = process.env.MIRROR_ALLOW_COMMANDS === '1';
 
+// Upload is a WRITE, and it was the last one still ungated — the third sighting
+// of the same asymmetry Bastion found in interrupt.
+//
+// MEASURED, 2026-08-24, on a mirror started with no grants whatsoever:
+//     POST /send   -> 403
+//     POST /upload -> 200, bytes written to inbox/, URL returned
+// So a mirror deliberately brought up READ-ONLY accepted arbitrary files into
+// the instance's directory. Permissions mode already refused (404); it was full
+// mode without --with-input that was open, which is exactly the deployment
+// someone chooses when they want to be watched and not written to.
+//
+// Defaults to allowSend rather than to `true`: if you are not trusted to put
+// TEXT into this session you are not trusted to put FILES in it, and text is
+// the weaker of the two. Every live mirror runs with send granted, so this
+// changes nothing for any of them — it only closes the case nobody was using
+// on purpose. Independently overridable, because "files but no text" is a
+// coherent thing to want even though nobody has asked for it yet.
+cfg.allowUpload = process.env.MIRROR_ALLOW_UPLOAD === '1' ? true
+                : process.env.MIRROR_ALLOW_UPLOAD === '0' ? false
+                : cfg.allowSend;
+
 /**
  * The allowlist. Short on purpose, and the omissions are the design.
  *
@@ -787,6 +808,15 @@ const server = http.createServer(async (req, res) => {
   // actually knows it arrived. A file that only appears in the browser is a
   // file the mind never learns about.
   if (req.method === 'POST' && p === '/upload') {
+    // The grant is checked FIRST, before same-origin, before the name, before a
+    // single byte is read. A mirror that was never granted uploads should not
+    // even parse the request — and refusing early means an ungranted mirror
+    // cannot be made to write a temp file by a malformed one.
+    if (!cfg.allowUpload) {
+      res.writeHead(403, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'uploads are not enabled on this mirror' }));
+      return;
+    }
     if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
     const rawName = req.headers['x-filename'];
     if (!rawName) {
@@ -1189,6 +1219,7 @@ const server = http.createServer(async (req, res) => {
         send: cfg.allowSend,
         interrupt: cfg.allowInterrupt,
         commands: cfg.allowCommands ? [...cfg.commandAllow].sort() : false,
+        upload: cfg.allowUpload,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
         may_write: mayWrite(resolveIdentity(req)),

@@ -34,12 +34,15 @@ WITH_INPUT=0
 PERMS_ONLY=0
 WITH_INTERRUPT=0
 WITH_COMMANDS=0
+WITH_UPLOADS=-1   # -1 = follow --with-input; 0/1 = explicit
 for arg in "$@"; do
   case "$arg" in
     --with-input)       WITH_INPUT=1 ;;
     --permissions-only) PERMS_ONLY=1 ;;
     --with-interrupt)   WITH_INTERRUPT=1 ;;
     --with-commands)    WITH_COMMANDS=1 ;;
+    --with-uploads)     WITH_UPLOADS=1 ;;
+    --no-uploads)       WITH_UPLOADS=0 ;;
     *) echo "error: unknown option $arg" >&2; exit 1 ;;
   esac
 done
@@ -196,6 +199,10 @@ ALLOW_INTERRUPT=$WITH_INTERRUPT
 # Slash commands type into the pane. Own grant, off unless asked for, in every
 # mode — never inherited from --with-input or from the environment.
 ALLOW_COMMANDS=$WITH_COMMANDS
+# Uploads follow --with-input unless named explicitly. Putting a FILE into an
+# instance is at least as much a write as putting TEXT into it, and this route
+# was ungated entirely until 2026-08-24 — a read-only mirror accepted files.
+if [[ $WITH_UPLOADS -eq -1 ]]; then ALLOW_UPLOAD=$WITH_INPUT; else ALLOW_UPLOAD=$WITH_UPLOADS; fi
 # Full mode keeps its historical default: interrupt available when there is a
 # tmux session to interrupt. Permissions mode grants nothing it wasn't asked for.
 if [[ $PERMS_ONLY -eq 0 && $WITH_INTERRUPT -eq 0 ]]; then ALLOW_INTERRUPT=1; fi
@@ -218,6 +225,7 @@ fi
 export MIRROR_ALLOW_SEND="$ALLOW_SEND"
 export MIRROR_ALLOW_INTERRUPT="$ALLOW_INTERRUPT"
 export MIRROR_ALLOW_COMMANDS="$ALLOW_COMMANDS"
+export MIRROR_ALLOW_UPLOAD="$ALLOW_UPLOAD"
 
 if [[ $ALLOW_SEND -eq 1 ]]; then
   echo "!! input ENABLED — the browser can inject messages into your live session."
@@ -225,6 +233,9 @@ if [[ $ALLOW_SEND -eq 1 ]]; then
 fi
 if [[ $ALLOW_INTERRUPT -eq 1 && $PERMS_ONLY -eq 1 ]]; then
   echo "!! interrupt ENABLED — the browser can send ESC to your live session."
+fi
+if [[ $ALLOW_UPLOAD -eq 1 ]]; then
+  echo "!! uploads ENABLED — the browser can write files into your inbox/."
 fi
 
 cat <<EOF

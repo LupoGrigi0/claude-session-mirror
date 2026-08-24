@@ -1629,6 +1629,17 @@ setInterval(async () => {
     // here would now pass undefined and clear a live request off the screen.
     const busy = h.last_event_age_s !== null && h.last_event_age_s < 45;
     stopBtn.classList.toggle('show', Boolean(h.write_path?.interrupt) && busy);
+    // Hide the paperclip when uploads aren't granted. The SERVER refusing is
+    // the security boundary — this is only so the control doesn't advertise a
+    // capability that will 403. Never the reverse: a visible button is not
+    // permission, and the check that matters happens before a byte is read.
+    if (h.write_path && h.write_path.upload === false){
+      attachBtn.style.display = 'none';
+      dz.dataset.disabled = '1';
+    } else {
+      attachBtn.style.display = '';
+      delete dz.dataset.disabled;
+    }
     const age = h.last_event_age_s;
     stat.textContent = `${count} events · seq ${h.seq} · ${age === null ? 'idle' : age + 's ago'}`
                      + (renderFailures ? ` · ${renderFailures} FAILED TO RENDER` : '');
