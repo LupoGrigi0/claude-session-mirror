@@ -178,9 +178,50 @@ if (markedPermissions && cfg.mode !== 'permissions') {
     `      rm ${modeMarker}`);
   process.exit(1);
 }
+// The marker is a LATCH, so refuse to close it over a data dir that has been
+// publishing a session. Otherwise the downgrade is silent AND permanent.
+//
+// Found 2026-08-25 by reading the systemd unit Bastion wrote from my code. The
+// template hardcodes `--permissions-only --with-input`, so at the next reboot a
+// full-mode instance would start in permissions mode, write this marker, and
+// then refuse every subsequent full-mode start — with an error telling a human
+// to `rm` a file they have never heard of. Five instances were one reboot away.
+//
+// I built this marker to stop a permissions-only session being silently
+// UPGRADED and having its transcript published. That protection is right and
+// stays. It just never considered the other direction, so a transient
+// misconfiguration became a permanent capability loss. Exactly the class Axiom
+// named: safe today, for a reason that lives somewhere else.
+const eventLogFile = path.join(cfg.dataDir, `${cfg.instance}.jsonl`);
+const hasPublished = (() => {
+  try { return fs.statSync(eventLogFile).size > 0; } catch { return false; }
+})();
 if (cfg.mode === 'permissions' && !markedPermissions) {
-  try { fs.writeFileSync(modeMarker, `marked ${new Date().toISOString()}\n`); }
+  // Auto-marking STAYS. The two harms are not symmetric: publishing a private
+  // transcript discloses data and cannot be undone, while losing the publish
+  // capability is an availability problem that is always recoverable. So the
+  // privacy latch keeps closing automatically.
+  //
+  // What changes is that it now records WHY. Marking a dir that already holds
+  // full-mode history is the fingerprint of a launcher that chose the mode, not
+  // a human — and that is exactly what the systemd template does today.
+  const note = hasPublished
+    ? `marked ${new Date().toISOString()}\n` +
+      `AUTO-MARKED over a data dir that had ALREADY PUBLISHED a session.\n` +
+      `That is the fingerprint of a launcher choosing the mode rather than a\n` +
+      `human choosing it — e.g. a unit file hardcoding --permissions-only. If\n` +
+      `this instance did not deliberately stop publishing, delete this file.\n`
+    : `marked ${new Date().toISOString()}\n`;
+  try { fs.writeFileSync(modeMarker, note); }
   catch (err) { console.error(`could not write mode marker: ${err.message}`); process.exit(1); }
+  if (hasPublished) {
+    console.error(
+      `WARNING: ${cfg.dataDir} had already published a session, and is now\n` +
+      `  marked permissions-only. Every later FULL-mode start will refuse until\n` +
+      `  the marker is removed. If a launcher chose this mode rather than a\n` +
+      `  human, that is a silent capability downgrade — fix the launcher, and:\n` +
+      `      rm ${modeMarker}`);
+  }
 }
 
 const log = (m) => console.log(`[mirror] ${new Date().toISOString()} ${m}`);

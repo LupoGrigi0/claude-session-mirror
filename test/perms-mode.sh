@@ -154,6 +154,38 @@ ok "$([ "$FRC" != "0" ] && echo 1 || echo 0)" "a FULL-mode start against that di
 ok "$(echo "$FULLOUT" | grep -qi 'refusing to start' && echo 1 || echo 0)" "and says so loudly"
 ok "$(echo "$FULLOUT" | grep -q 'rm ' && echo 1 || echo 0)" "and states how to clear it deliberately"
 
+
+echo
+echo "the marker records WHY it was written"
+# 2026-08-25: the systemd unit template hardcodes `--permissions-only --with-input`.
+# At the next reboot a FULL-mode instance starts in permissions mode, the marker
+# latches, and every later full-mode start refuses -- recoverable only by rm-ing a
+# file nobody has heard of. Auto-marking stays (disclosing a private transcript is
+# irreversible; losing publish is not), but the latch must be LEGIBLE.
+LD=$(mktemp -d); mkdir -p "$LD/data"
+printf '%s\n' '{"seq":1,"type":"user_message","body":{"text":"published"}}' > "$LD/data/latch.jsonl"
+OUT=$(MIRROR_INSTANCE=latch MIRROR_MODE=permissions MIRROR_DATA_DIR="$LD/data" \
+      MIRROR_BIND=127.0.0.1 MIRROR_PORT=22092 MIRROR_CHANNEL_URL=http://127.0.0.1:21999 \
+      timeout 6 node "$SRC/src/mirror-server.mjs" 2>&1)
+ok "$([ -f "$LD/data/.permissions-only" ] && echo 1 || echo 0)" "still marks (privacy latch is not weakened)"
+ok "$(grep -q 'AUTO-MARKED' "$LD/data/.permissions-only" && echo 1 || echo 0)" \
+   "the MARKER FILE records that it was auto-marked over published history"
+ok "$(grep -q 'delete this file' "$LD/data/.permissions-only" && echo 1 || echo 0)" \
+   "and tells whoever finds it how to undo it"
+ok "$(echo "$OUT" | grep -q 'silent capability downgrade' && echo 1 || echo 0)" \
+   "warns on stderr at the moment it happens"
+
+FD=$(mktemp -d); mkdir -p "$FD/data"
+OUT2=$(MIRROR_INSTANCE=fresh MIRROR_MODE=permissions MIRROR_DATA_DIR="$FD/data" \
+       MIRROR_BIND=127.0.0.1 MIRROR_PORT=22091 MIRROR_CHANNEL_URL=http://127.0.0.1:21999 \
+       timeout 6 node "$SRC/src/mirror-server.mjs" 2>&1)
+ok "$([ -f "$FD/data/.permissions-only" ] && echo 1 || echo 0)" "a FRESH dir still marks normally"
+ok "$(grep -q 'AUTO-MARKED' "$FD/data/.permissions-only" && echo 0 || echo 1)" \
+   "and carries NO warning, because nothing was downgraded"
+ok "$(echo "$OUT2" | grep -q 'silent capability downgrade' && echo 0 || echo 1)" "no spurious warning"
+rm -rf "$LD" "$FD"
+
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ] || { echo; echo "--- log ---"; cat "$DIR/log"; }
