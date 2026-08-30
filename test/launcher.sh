@@ -101,5 +101,40 @@ ok "$(grep -qiE 'JSONDecodeError|Expecting value' <<<"$OUT6" && echo 1 || echo 0
 rm -rf "$BAD"
 
 echo
+echo "8. a NOISY python3 that exits 0 must not contaminate the instance id"
+# `$(cmd 2>&1)` merges stderr into the captured value ALWAYS, not only on
+# failure. A python that succeeds while warning about a locale, a deprecation,
+# or (on Windows) an install banner would silently become part of INSTANCE --
+# which feeds MIRROR_ROOM, MIRROR_BASE_PATH and every log line. Nothing fails.
+# Found by Lodestone-8ec9. The env that provokes it is `env -i`, which is
+# exactly what this suite uses, and a boot unit, which is minimal by design.
+SHIM=$(mktemp -d)
+cat > "$SHIM/python3" <<'SH'
+#!/usr/bin/env bash
+echo "[WARNING] Failed to read unmanaged installs: expected str, bytes or os.PathLike" >&2
+echo "Installing Python 3.14.7." >&2
+exec /usr/bin/python3 "$@"
+SH
+chmod +x "$SHIM/python3"
+mkdir -p "$CH"; printf '%s\n' '{"type":"summary","summary":"t"}' > "$CH/sid1.jsonl"
+rm -f "$INST/.claude-session-id"
+OUT7=$(env -i PATH="$SHIM:$PATH" HOME="$FAKEHOME" \
+        HACS_IDENTITY_FILE="$INST/.hacs-identity" \
+        CLAUDE_CODE_SESSION_ID=sid1 \
+        MIRROR_BIND=127.0.0.1 MIRROR_PORT=22087 \
+        timeout 10 "$SRC/bin/mirror-start.sh" --with-input 2>&1)
+ok "$(grep -qE '^instance +: *lt *$' <<<"$OUT7" && echo 1 || echo 0)" \
+   "instance id is exactly 'lt', not the banner + lt"
+# The banner SHOULD appear in the terminal: CHANNEL_PORT's python3 call has no
+# redirect, so its stderr passes straight through while the captured value stays
+# clean. That is correct and deliberate. What must never happen is stderr text
+# ending up in a REPORTED FIELD, so assert on the fields the launcher prints.
+ok "$(grep -E '^(instance|mode|transcript) ' <<<"$OUT7" | grep -q 'WARNING' && echo 0 || echo 1)" \
+   "no banner text in any reported field"
+ok "$(grep -qE '^transcript +: *\S' <<<"$OUT7" && echo 1 || echo 0)" \
+   "and it still resolved a transcript (the launcher reached the end)"
+rm -rf "$SHIM"
+
+echo
 echo "passed=$pass failed=$fail"
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

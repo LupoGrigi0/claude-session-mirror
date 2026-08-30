@@ -87,16 +87,34 @@ die() { echo "error: $*" >&2; exit 1; }
 # boundary. What we owe instead is a failure that says what is actually wrong,
 # because "no such file" about a file that is right there is the same misdirecting
 # diagnostic we just fixed one function below.
-if ! INSTANCE=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig'))['instanceId'])" 2>&1); then
-  if [[ "$INSTANCE" == *FileNotFoundError* || "$INSTANCE" == *"No such file"* ]]; then
+# stderr goes to a FILE, never into the captured value. `$(cmd 2>&1)` merges the
+# two streams ALWAYS, not only on failure — so a python that exits 0 while
+# printing anything to stderr (a locale warning, a deprecation notice, or on
+# Windows an install banner from the WindowsApps shim) silently becomes part of
+# INSTANCE. Nothing fails; it SUCCEEDS with a garbage value, and INSTANCE feeds
+# MIRROR_ROOM, MIRROR_BASE_PATH and every log line.
+#
+# Found by Lodestone-8ec9 in code I had written ten minutes earlier, while
+# verifying the diagnostic it was added to serve. The instrumentation for
+# explaining a failure had become a way to produce a wrong success.
+#
+# The trigger they hit is Windows-specific; the bug is not, and the environment
+# that provokes it is exactly two of mine: test/launcher.sh runs the launcher
+# under `env -i`, and a boot-time unit is minimal by design — the very case rung
+# 2 of the trust ladder exists for.
+PYERRF=$(mktemp)
+if ! INSTANCE=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig'))['instanceId'])" 2>"$PYERRF"); then
+  PYERR=$(cat "$PYERRF"); rm -f "$PYERRF"
+  if [[ "$PYERR" == *FileNotFoundError* || "$PYERR" == *"No such file"* ]]; then
     die "python3 could not open $IDENTITY, though bash can see it.
   This is what a POSIX path handed to native Windows Python looks like.
   bash-on-Windows is NOT a supported way to run this launcher — use bin/mirror-start.ps1.
   On Linux, this means the path is genuinely unreadable by python3.
-  Raw error: $INSTANCE"
+  Raw error: $PYERR"
   fi
-  die "could not parse $IDENTITY: $INSTANCE"
+  die "could not parse $IDENTITY: $PYERR"
 fi
+rm -f "$PYERRF"
 # encoding='utf-8-sig' because PowerShell 5.1's `-Encoding utf8` writes a UTF-8
 # BOM (verified ef bb bf by Lodestone on lupos-lap), and python's json.load then
 # fails with "Expecting value: line 1 column 1 (char 0)" — which reads as a
