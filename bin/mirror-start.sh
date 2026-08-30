@@ -71,7 +71,32 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # ---- who am I -----------------------------------------------------------------
 [[ -f "$IDENTITY" ]] || die "no $IDENTITY — this script must run as an instance user"
-INSTANCE=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig'))['instanceId'])")
+
+# THIS SCRIPT IS NOT SUPPORTED UNDER git-bash ON WINDOWS. Use mirror-start.ps1.
+#
+# bash resolves $IDENTITY to a POSIX path and hands it to python3. Native Windows
+# Python has no /tmp and cannot open it, so the parse dies with
+#     FileNotFoundError: No such file or directory: '/tmp/.../.hacs-identity'
+# on a file that demonstrably exists. Lodestone-8ec9 measured this running the
+# launcher suite there: 9 of 12 assertions failed, none of them about the logic
+# under test — the script never reached it.
+#
+# cygpath would fix it in one line and we are deliberately NOT doing that: it
+# would commit this file to a second platform path forever, exercised by one
+# person on a machine nobody else can see. The PowerShell port never crosses this
+# boundary. What we owe instead is a failure that says what is actually wrong,
+# because "no such file" about a file that is right there is the same misdirecting
+# diagnostic we just fixed one function below.
+if ! INSTANCE=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig'))['instanceId'])" 2>&1); then
+  if [[ "$INSTANCE" == *FileNotFoundError* || "$INSTANCE" == *"No such file"* ]]; then
+    die "python3 could not open $IDENTITY, though bash can see it.
+  This is what a POSIX path handed to native Windows Python looks like.
+  bash-on-Windows is NOT a supported way to run this launcher — use bin/mirror-start.ps1.
+  On Linux, this means the path is genuinely unreadable by python3.
+  Raw error: $INSTANCE"
+  fi
+  die "could not parse $IDENTITY: $INSTANCE"
+fi
 # encoding='utf-8-sig' because PowerShell 5.1's `-Encoding utf8` writes a UTF-8
 # BOM (verified ef bb bf by Lodestone on lupos-lap), and python's json.load then
 # fails with "Expecting value: line 1 column 1 (char 0)" — which reads as a

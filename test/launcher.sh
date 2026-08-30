@@ -89,5 +89,17 @@ OUT5=$(run "sid1")
 ok "$(grep -qF "$CH/sid1.jsonl" <<<"$OUT5" && echo 1 || echo 0)" "order of authority preserved"
 
 echo
+echo "7. an unparseable identity fails LEGIBLY, not with a lie"
+BAD=$(mktemp -d); mkdir -p "$BAD"
+printf 'not json at all\n' > "$BAD/.hacs-identity"
+OUT6=$(env -i PATH="$PATH" HOME="$FAKEHOME" HACS_IDENTITY_FILE="$BAD/.hacs-identity" \
+        MIRROR_BIND=127.0.0.1 MIRROR_PORT=22087 \
+        timeout 10 "$SRC/bin/mirror-start.sh" --with-input 2>&1)
+ok "$(grep -q 'could not parse' <<<"$OUT6" && echo 1 || echo 0)" "says it could not PARSE, not that the file is missing"
+ok "$(grep -qF "$BAD/.hacs-identity" <<<"$OUT6" && echo 1 || echo 0)" "names the file"
+ok "$(grep -qiE 'JSONDecodeError|Expecting value' <<<"$OUT6" && echo 1 || echo 0)" "and includes the raw parser error"
+rm -rf "$BAD"
+
+echo
 echo "passed=$pass failed=$fail"
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)
