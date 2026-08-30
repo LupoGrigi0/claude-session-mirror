@@ -29,12 +29,34 @@ printf '{"instanceId":"lt","channelPort":21999}\n' > "$INST/.hacs-identity"
 SLUG=$(echo "$INST" | sed 's/[^a-zA-Z0-9]/-/g')
 CH="$INST/.claude/projects/$SLUG"; UH="$FAKEHOME/.claude/projects/$SLUG"
 
+# Scratch CWD, and a GUARD, because `env -i` is not a neutral harness.
+#
+# It does not merely hide the environment from the child — it changes what the
+# child DOES. Lodestone-8ec9 ran `env -i PATH=... python3 -c ...` from a repo
+# root on Windows and the WindowsApps python shim, deprived of LOCALAPPDATA,
+# installed a 167MB Python into the CURRENT WORKING DIRECTORY. `git add -A` then
+# swept 2,784 files into a shared repo's permanent history.
+#
+# This suite ran the launcher — which calls python3 — under `env -i`, inheriting
+# whatever CWD invoked it. run-all.sh cds to the REPO ROOT. So on any Windows
+# box this file could have installed a runtime into the repository it is testing.
+#
+# The guard is the point, not the cd: an accident that cannot happen beats one
+# that is merely avoided, and bash-on-Windows being "unsupported" is precisely
+# the state in which nobody is watching when someone tries it anyway.
+SCRATCH="$DIR/cwd"; mkdir -p "$SCRATCH"
 run(){  # run the launcher with a controlled environment, capture stderr
-  env -i PATH="$PATH" HOME="$FAKEHOME" \
+  case "$SCRATCH" in
+    /tmp/*|/var/tmp/*) : ;;
+    *) echo "FATAL: refusing to run a stripped-env child outside a temp dir (CWD=$SCRATCH)" >&2
+       exit 2 ;;
+  esac
+  [[ -e "$SCRATCH/.git" ]] && { echo "FATAL: scratch CWD is a git repo" >&2; exit 2; }
+  ( cd "$SCRATCH" && env -i PATH="$PATH" HOME="$FAKEHOME" \
       HACS_IDENTITY_FILE="$INST/.hacs-identity" \
       ${1:+CLAUDE_CODE_SESSION_ID="$1"} \
       MIRROR_BIND=127.0.0.1 MIRROR_PORT=22087 \
-      timeout 10 "$SRC/bin/mirror-start.sh" --with-input 2>&1
+      timeout 10 "$SRC/bin/mirror-start.sh" --with-input 2>&1 )
 }
 
 echo
@@ -92,7 +114,7 @@ echo
 echo "7. an unparseable identity fails LEGIBLY, not with a lie"
 BAD=$(mktemp -d); mkdir -p "$BAD"
 printf 'not json at all\n' > "$BAD/.hacs-identity"
-OUT6=$(env -i PATH="$PATH" HOME="$FAKEHOME" HACS_IDENTITY_FILE="$BAD/.hacs-identity" \
+OUT6=$(cd "$SCRATCH" && env -i PATH="$PATH" HOME="$FAKEHOME" HACS_IDENTITY_FILE="$BAD/.hacs-identity" \
         MIRROR_BIND=127.0.0.1 MIRROR_PORT=22087 \
         timeout 10 "$SRC/bin/mirror-start.sh" --with-input 2>&1)
 ok "$(grep -q 'could not parse' <<<"$OUT6" && echo 1 || echo 0)" "says it could not PARSE, not that the file is missing"
@@ -118,7 +140,7 @@ SH
 chmod +x "$SHIM/python3"
 mkdir -p "$CH"; printf '%s\n' '{"type":"summary","summary":"t"}' > "$CH/sid1.jsonl"
 rm -f "$INST/.claude-session-id"
-OUT7=$(env -i PATH="$SHIM:$PATH" HOME="$FAKEHOME" \
+OUT7=$(cd "$SCRATCH" && env -i PATH="$SHIM:$PATH" HOME="$FAKEHOME" \
         HACS_IDENTITY_FILE="$INST/.hacs-identity" \
         CLAUDE_CODE_SESSION_ID=sid1 \
         MIRROR_BIND=127.0.0.1 MIRROR_PORT=22087 \
