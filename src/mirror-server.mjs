@@ -25,6 +25,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { EventLog } from './eventlog.mjs';
 import { TranscriptTailer } from './tailer.mjs';
 import { schemaCanary } from './normalizer.mjs';
@@ -37,7 +38,17 @@ const cfg = {
   instance:   process.env.MIRROR_INSTANCE   || 'unknown',
   display:    process.env.MIRROR_DISPLAY    || process.env.MIRROR_INSTANCE || 'Instance',
   transcript: process.env.MIRROR_TRANSCRIPT || '',
-  dataDir:    process.env.MIRROR_DATA_DIR   || path.join(process.env.HOME || '/tmp', '.claude-mirror'),
+  // os.homedir() rather than $HOME, and NOT because Windows spells it
+  // USERPROFILE. Lodestone measured what the old line actually did on native
+  // Windows, where HOME is undefined:
+  //     path.join(undefined || '/tmp', '.claude-mirror')  ->  \\tmp\\.claude-mirror
+  // It does not fail. It silently resolves to the ROOT OF THE CURRENT DRIVE —
+  // and that is where the event log and sent.jsonl would land, the file holding
+  // text that may never have reached anyone. A wrong path that works is worse
+  // than one that throws. os.homedir() is correct on both platforms with no
+  // branch, which is why it beats the `HOME || USERPROFILE` version I'd have
+  // written.
+  dataDir:    process.env.MIRROR_DATA_DIR   || path.join(os.homedir() || '/tmp', '.claude-mirror'),
   port:  Number(process.env.MIRROR_PORT || 22090),
   bind:         process.env.MIRROR_BIND || '127.0.0.1',
   room:         process.env.MIRROR_ROOM || 'default',

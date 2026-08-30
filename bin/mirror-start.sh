@@ -71,8 +71,13 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # ---- who am I -----------------------------------------------------------------
 [[ -f "$IDENTITY" ]] || die "no $IDENTITY — this script must run as an instance user"
-INSTANCE=$(python3 -c "import json;print(json.load(open('$IDENTITY'))['instanceId'])")
-CHANNEL_PORT=$(python3 -c "import json;print(json.load(open('$IDENTITY')).get('channelPort',''))")
+INSTANCE=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig'))['instanceId'])")
+# encoding='utf-8-sig' because PowerShell 5.1's `-Encoding utf8` writes a UTF-8
+# BOM (verified ef bb bf by Lodestone on lupos-lap), and python's json.load then
+# fails with "Expecting value: line 1 column 1 (char 0)" — which reads as a
+# CORRUPT FILE rather than an encoding problem, and sends you looking in the
+# wrong place. Harmless on files without a BOM.
+CHANNEL_PORT=$(python3 -c "import json,io;print(json.load(io.open('$IDENTITY',encoding='utf-8-sig')).get('channelPort',''))")
 [[ -n "$INSTANCE" ]] || die "could not read instanceId from $IDENTITY"
 
 # State lives beside the IDENTITY FILE, not beside $HOME.
