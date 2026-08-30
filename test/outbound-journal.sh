@@ -183,5 +183,7 @@ ok "$([ "$S4" = "200" ] && [ "$U4" = "403" ] && echo 1 || echo 0)" \
    "MIRROR_ALLOW_UPLOAD=0 with send on: send $S4, upload $U4"
 
 echo
+
+echo
 echo "passed=$pass failed=$fail"
-[ "$fail" = "0" ]
+exit $([ "$fail" = "0" ] && echo 0 || echo 1)

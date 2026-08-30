@@ -99,6 +99,24 @@ process.exit(r.every(x=>x[0])?0:1)
 " && pass=$((pass+4)) || fail=$((fail+1))
 
 echo
+
+echo
+echo "the schema canary silences a type only AFTER it is inspected"
+# atis-latch appeared 2026-08-30 and the canary flagged it. Adding a type to the
+# known list without looking at it is how a mirror silently stops showing
+# something. This asserts what we actually verified: it carries no conversation.
+CANARY_OUT=$(node -e '
+  const { normalizeEntry } = await import("'"$SRC"'/src/normalizer.mjs");
+  const ev = normalizeEntry({type:"atis-latch",atis:"",sessionId:"s"},
+                            {instance:"t",instanceDisplay:"T",roomId:"r",
+                             speaker:{id:"u",kind:"human",display:"U"}});
+  console.log(JSON.stringify(ev));
+' 2>&1 || echo ERR)
+ok "$([ "$CANARY_OUT" = "[]" ] && echo 1 || echo 0)" "atis-latch normalizes to NO events (got $CANARY_OUT)"
+ok "$(grep -q "'atis-latch'" "$SRC/src/normalizer.mjs" && echo 1 || echo 0)" "and is in KNOWN_ENTRY_TYPES, so it stops warning"
+
+echo
+
+echo
 echo "passed=$pass failed=$fail"
-[ "$fail" = "0" ] || { echo; echo "--- server log ---"; cat "$DIR/log2" 2>/dev/null; }
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

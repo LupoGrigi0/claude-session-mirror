@@ -100,6 +100,7 @@ echo "7. permissions state is never written to the durable log"
 ok "$(grep -q '"type":"permissions"' "$DIR/data/e2etest.jsonl" 2>/dev/null && echo 0 || echo 1)" "no permissions events persisted"
 
 echo
+
+echo
 echo "passed=$pass failed=$fail"
-[ "$fail" = "0" ] || { echo; echo "--- server log ---"; cat "$DIR/server.log"; }
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

@@ -106,8 +106,27 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   # there. It looks POSIX-flavoured and is already correct on both platforms;
   # "fixing" it would break Windows.
   SLUG=$(echo "$INSTANCE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')
-  PROJ="$INSTANCE_DIR/.claude/projects/$SLUG"
-  [[ -d "$PROJ" ]] || die "no project dir at $PROJ"
+
+  # Two layouts, and the CHOICE IS MADE BY EVIDENCE, not by which exists first.
+  #
+  #   1. beside the instance   — every chassis instance, where the instance dir
+  #                              IS the session cwd
+  #   2. under the user profile — an instance that runs in a project directory
+  #                              while Claude Code keeps transcripts in $HOME
+  #
+  # Found by Lodestone-8ec9 porting to Windows, and NOT a Windows issue: Bastion
+  # is already case 2 on this Linux box. His chassis path is a SYMLINK to
+  # /root/.claude/projects/<slug> — the assumption failed here months ago and was
+  # papered over with a link nobody wrote down. My check reported "no chassis dir"
+  # for him only because I cannot traverse /root; the symlink is not dangling, it
+  # is unreadable from where I stand.
+  #
+  # $HOME is right for candidate 2 even though state lives beside INSTANCE_DIR:
+  # this is where CLAUDE CODE put its transcripts, a fact about its behaviour,
+  # not a preference of ours. (Lodestone flagged this as a judgement call worth
+  # checking rather than landing quietly. It checks out — for Bastion, $HOME
+  # resolves to exactly where his transcripts are.)
+  CANDIDATES=("$INSTANCE_DIR/.claude/projects/$SLUG" "$HOME/.claude/projects/$SLUG")
 
   # ---- which transcript? A TRUST LADDER, not a guess ---------------------------
   #
@@ -136,6 +155,32 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
     printf '%s\n' "$SID" > "$SESSION_ID_FILE" 2>/dev/null || true
   elif [[ -r "$SESSION_ID_FILE" ]]; then
     SID="$(head -1 "$SESSION_ID_FILE" | tr -d '[:space:]')"; SID_SRC="recorded id"
+  fi
+
+  # Pick the directory that CONTAINS the session we are looking for, rather than
+  # the first one that happens to exist. A directory existing is not evidence
+  # about which mind lives in it; a transcript named by our own session id is.
+  PROJ=""
+  if [[ -n "$SID" ]]; then
+    for c in "${CANDIDATES[@]}"; do
+      [[ -f "$c/$SID.jsonl" ]] && { PROJ="$c"; break; }
+    done
+    if [[ -z "$PROJ" ]]; then
+      printf 'session id %s names no transcript in any known layout. Tried:\n' "$SID" >&2
+      printf '  %s/%s.jsonl\n' "${CANDIDATES[@]}" "$SID" >&2
+      die "refusing to guess — a named session with no transcript is an error, never a reason to fall back"
+    fi
+  else
+    # No session id at all: we are about to guess by mtime, so REFUSE to also
+    # guess which directory. Exactly one candidate must exist.
+    for c in "${CANDIDATES[@]}"; do [[ -d "$c" ]] && PROJ="${PROJ:+AMBIGUOUS}${PROJ:-$c}"; done
+    if [[ "$PROJ" == AMBIGUOUS* ]]; then
+      printf 'two project directories exist and no session id is known:\n' >&2
+      printf '  %s\n' "${CANDIDATES[@]}" >&2
+      die "refusing to guess twice — set CLAUDE_CODE_SESSION_ID or record one"
+    fi
+    [[ -n "$PROJ" ]] || { printf 'no project dir found. Tried:\n' >&2
+                          printf '  %s\n' "${CANDIDATES[@]}" >&2; die "no project dir"; }
   fi
 
   if [[ -n "$SID" ]]; then

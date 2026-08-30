@@ -215,6 +215,7 @@ ok "$(curl -s http://127.0.0.1:22090/health | grep -q '"interrupt": true' && ech
 kill $IP 2>/dev/null; rm -rf "$FD2"
 
 echo
+
+echo
 echo "passed=$pass failed=$fail"
-[ "$fail" = "0" ] || { echo; echo "--- log ---"; cat "$DIR/log"; }
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

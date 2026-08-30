@@ -202,5 +202,7 @@ ok "$(h | grep -q ',false,' && echo 1 || echo 0)" \
 ok "$(h | grep -q '^\[1,' && echo 1 || echo 0)" "and the straggler is still counted, not forgotten $(h)"
 
 echo
+
+echo
 echo "passed=$pass failed=$fail"
-[ "$fail" = "0" ]
+exit $([ "$fail" = "0" ] && echo 0 || echo 1)

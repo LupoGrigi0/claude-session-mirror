@@ -26,6 +26,12 @@ export const KNOWN_ENTRY_TYPES = new Set([
   'mode', 'permission-mode', 'file-history-snapshot', 'attachment',
   'last-prompt', 'ai-title', 'custom-title', 'agent-name',
   'queue-operation', 'file-history-delta', 'pr-link', 'summary',
+  // Appeared 2026-08-30, flagged by the schema canary rather than noticed by a
+  // human. INSPECTED before being silenced, which is the only honest way to add
+  // something to this list: 18 occurrences, and every field is
+  //     { type, atis: "", sessionId }
+  // No conversation, no text, nothing a viewer would miss. Ignored deliberately.
+  'atis-latch',
 ]);
 
 /** Entry types we actually turn into mirror events. */
