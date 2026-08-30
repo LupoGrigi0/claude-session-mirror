@@ -93,9 +93,12 @@ cfg.allowSend = process.env.MIRROR_ALLOW_SEND === '1' ? true
 // mode refused message injection while still offering ESC to a ROOT session.
 // Bastion caught that asymmetry: both are writes, so both need a grant. Full
 // mode keeps its previous behaviour; permissions mode requires an explicit yes.
-cfg.allowInterrupt = process.env.MIRROR_ALLOW_INTERRUPT === '1' ? true
-                   : process.env.MIRROR_ALLOW_INTERRUPT === '0' ? false
-                   : cfg.mode === 'full' && Boolean(cfg.tmuxSession);
+// Default FALSE, in every mode. `Boolean(cfg.tmuxSession)` was never evidence
+// of anything: tmuxSession falls back to the instance id, so it is true for any
+// named instance whether or not tmux exists — which on Windows it does not.
+// A grant justified by the presence of a string is not a grant justified by the
+// presence of a capability.
+cfg.allowInterrupt = process.env.MIRROR_ALLOW_INTERRUPT === '1';
 
 // Slash commands type text into a live pane, so they get their OWN grant rather
 // than riding on another. Off unless asked for, in every mode — the lesson from
@@ -1092,16 +1095,21 @@ const server = http.createServer(async (req, res) => {
   // 2026-08-16 ssh to this host was down while the tailnet stayed up, which
   // meant the only way to interrupt a running turn was unavailable.
   if (req.method === 'POST' && p === '/interrupt') {
+    // Grant FIRST, as in /upload. It used to answer 415 for a missing
+    // content-type before ever reaching the capability check, so an ungranted
+    // mirror reported a malformed request rather than a refused one — and a
+    // caller probing whether interrupt is available got told about a header.
+    // A refusal should say why it refused.
+    if (!cfg.allowInterrupt) {
+      res.writeHead(403, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'interrupt is not enabled on this mirror' })); return;
+    }
     if (!sameOrigin(req)) { res.writeHead(403).end('cross-origin'); return; }
     if (!/^application\/json/i.test(req.headers['content-type'] || '')) {
       res.writeHead(415).end('content-type must be application/json'); return;
     }
     const who = resolveIdentity(req);
     if (!mayWrite(who)) { res.writeHead(401).end('unauthenticated'); return; }
-    if (!cfg.allowInterrupt) {
-      res.writeHead(403, {'Content-Type':'application/json'})
-         .end(JSON.stringify({ ok:false, error:'interrupt is not enabled on this mirror' })); return;
-    }
     if (!cfg.tmuxSession) {
       res.writeHead(503, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error:'no tmux session configured' })); return;

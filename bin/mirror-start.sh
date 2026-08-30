@@ -100,6 +100,11 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   # replaced by '-'. For a chassis instance the instance directory IS the cwd,
   # which is what keeps the slug stable across teleports — and it stays correct
   # for a detached home, where $HOME would have pointed somewhere else entirely.
+  # DO NOT add a platform branch here. Verified by Lodestone-8ec9 on Windows:
+  # this collapses BOTH "D:\Lupo\source\AI\x" and "D:/Lupo/source/AI/x" to
+  # "D--Lupo-source-AI-x", byte-identical to the slug Claude Code itself writes
+  # there. It looks POSIX-flavoured and is already correct on both platforms;
+  # "fixing" it would break Windows.
   SLUG=$(echo "$INSTANCE_DIR" | sed 's/[^a-zA-Z0-9]/-/g')
   PROJ="$INSTANCE_DIR/.claude/projects/$SLUG"
   [[ -d "$PROJ" ]] || die "no project dir at $PROJ"
@@ -208,9 +213,18 @@ ALLOW_COMMANDS=$WITH_COMMANDS
 # instance is at least as much a write as putting TEXT into it, and this route
 # was ungated entirely until 2026-08-24 — a read-only mirror accepted files.
 if [[ $WITH_UPLOADS -eq -1 ]]; then ALLOW_UPLOAD=$WITH_INPUT; else ALLOW_UPLOAD=$WITH_UPLOADS; fi
-# Full mode keeps its historical default: interrupt available when there is a
-# tmux session to interrupt. Permissions mode grants nothing it wasn't asked for.
-if [[ $PERMS_ONLY -eq 0 && $WITH_INTERRUPT -eq 0 ]]; then ALLOW_INTERRUPT=1; fi
+# Interrupt is OFF unless asked for, in EVERY mode. It used to default ON in
+# full mode, justified as "there is a tmux session to interrupt" — but
+# MIRROR_TMUX_SESSION falls back to the instance id, so that premise was a NAME,
+# never a verified session. Bastion found this exact shape in permissions mode
+# ("enabled by merely knowing the tmux session name"); I fixed it there and left
+# it standing here, eight lines below my own comment saying a capability is
+# granted only by asking.
+#
+# Lodestone-8ec9 hit it porting to Windows, where there is no tmux at all: a
+# write capability defaulting ON because of a component that does not exist. They
+# diverged loudly rather than inheriting it, and were right to. Upstream now
+# matches their port.
 
 if [[ $PERMS_ONLY -eq 1 ]]; then
   export MIRROR_MODE=permissions

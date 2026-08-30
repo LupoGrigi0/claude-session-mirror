@@ -187,6 +187,34 @@ rm -rf "$LD" "$FD"
 
 
 echo
+echo "interrupt is OFF by default in FULL mode too (Lodestone, Windows port)"
+# It used to default ON in full mode, justified by "there is a tmux session" —
+# but MIRROR_TMUX_SESSION falls back to the instance id, so the premise was a
+# NAME, not a verified session. On a box with no tmux at all it was a write
+# capability granted by the existence of a string.
+FD2=$(mktemp -d); mkdir -p "$FD2/data"
+printf '%s\n' '{"type":"summary","summary":"t"}' > "$FD2/s.jsonl"
+MIRROR_INSTANCE=fullint MIRROR_TRANSCRIPT="$FD2/s.jsonl" MIRROR_DATA_DIR="$FD2/data" \
+  MIRROR_BIND=127.0.0.1 MIRROR_PORT=22090 \
+  node "$SRC/src/mirror-server.mjs" > "$FD2/log" 2>&1 &
+IP=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:22090/health" >/dev/null 2>&1 && break; sleep 0.25; done
+ok "$(curl -s http://127.0.0.1:22090/health | grep -q '"interrupt": false' && echo 1 || echo 0)" \
+   "full mode, tmux name present, interrupt still DISABLED"
+ok "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:22090/interrupt \
+      -H "Origin: http://127.0.0.1:22090" | grep -q '403' && echo 1 || echo 0)" \
+   "POST /interrupt -> 403 without the grant"
+kill $IP 2>/dev/null; sleep 0.4
+MIRROR_INSTANCE=fullint2 MIRROR_TRANSCRIPT="$FD2/s.jsonl" MIRROR_DATA_DIR="$FD2/data2" \
+  MIRROR_BIND=127.0.0.1 MIRROR_PORT=22090 MIRROR_ALLOW_INTERRUPT=1 \
+  node "$SRC/src/mirror-server.mjs" > "$FD2/log2" 2>&1 &
+IP=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:22090/health" >/dev/null 2>&1 && break; sleep 0.25; done
+ok "$(curl -s http://127.0.0.1:22090/health | grep -q '"interrupt": true' && echo 1 || echo 0)" \
+   "and ENABLED when explicitly asked for"
+kill $IP 2>/dev/null; rm -rf "$FD2"
+
+echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ] || { echo; echo "--- log ---"; cat "$DIR/log"; }
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)
