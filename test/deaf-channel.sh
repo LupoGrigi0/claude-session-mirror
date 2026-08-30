@@ -154,5 +154,53 @@ QUIET=$(h)
 ok "$(echo "$QUIET" | grep -q ',true,' && echo 1 || echo 0)" "silent session IS declared deaf $QUIET"
 
 echo
+echo "8. confirmation reads records that RENDERING ignores"
+# Measured on my own log 2026-08-30: 6 of 16 real sends never confirmed, because a
+# channel message can surface as a queue-operation or a queued_command attachment
+# rather than a user turn -- record types the normalizer drops ON PURPOSE. Keying
+# confirmation off rendered events called delivered messages permanently missing.
+kill $SRV 2>/dev/null; sleep 0.5
+rm -rf "$DIR/data6"; printf '%s\n' '{"type":"summary","summary":"t"}' > "$DIR/raw.jsonl"
+MIRROR_INSTANCE=rawtest MIRROR_TRANSCRIPT="$DIR/raw.jsonl" MIRROR_DATA_DIR="$DIR/data6" \
+MIRROR_BIND=127.0.0.1 MIRROR_PORT=$PORT MIRROR_CHANNEL_URL="http://127.0.0.1:$CHAN" \
+MIRROR_ALLOW_SEND=1 MIRROR_DEAF_AFTER_MS=2000 \
+node "$SRC/src/mirror-server.mjs" > "$DIR/server6.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/send" \
+  -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" \
+  -d '{"text":"surfaced as a queued command not a user turn"}'
+ok "$(h | grep -q '^\[1,' && echo 1 || echo 0)" "tracked as unconfirmed $(h)"
+# The shape the normalizer IGNORES. If confirmation only read rendered events,
+# this would never clear.
+cat >> "$DIR/raw.jsonl" <<'EOJ'
+{"type":"queue-operation","operation":"remove","content":"[channel message from Lupo@web]\n\nsurfaced as a queued command not a user turn","timestamp":"2026-08-30T00:00:00.000Z","uuid":"q-1","sessionId":"s"}
+EOJ
+for _ in $(seq 1 40); do h | grep -q '^\[0,' && break; sleep 0.25; done
+ok "$(h | grep -q '^\[0,' && echo 1 || echo 0)" "CONFIRMED from a queue-operation record $(h)"
+ok "$(grep -q 'delivery CONFIRMED' "$DIR/server6.log" && echo 1 || echo 0)" "and logged as a confirmation"
+# ...and it must NOT have been rendered as conversation.
+ok "$(grep -c '"type":"user_message"' "$DIR/data6/rawtest.jsonl" 2>/dev/null | grep -q '^0$' && echo 1 || echo 0)" \
+   "while still NOT rendering it as a message (queue-operation stays ignored)"
+
+echo
+echo "8b. one stuck straggler must not pin the flag forever"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/send" \
+  -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" \
+  -d '{"text":"this one will never come back"}'
+for _ in $(seq 1 40); do h | grep -q ',true,' && break; sleep 0.25; done
+ok "$(h | grep -q ',true,' && echo 1 || echo 0)" "goes deaf on the straggler $(h)"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/send" \
+  -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" \
+  -d '{"text":"but this one lands fine"}'
+cat >> "$DIR/raw.jsonl" <<'EOJ'
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"but this one lands fine"}]},"timestamp":"2026-08-30T00:01:00.000Z","uuid":"u-9","sessionId":"s"}
+EOJ
+for _ in $(seq 1 40); do h | grep -q ',false,' && break; sleep 0.25; done
+ok "$(h | grep -q ',false,' && echo 1 || echo 0)" \
+   "a LATER confirmation clears deaf even with the straggler outstanding $(h)"
+ok "$(h | grep -q '^\[1,' && echo 1 || echo 0)" "and the straggler is still counted, not forgotten $(h)"
+
+echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = "0" ]

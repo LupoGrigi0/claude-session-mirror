@@ -270,21 +270,51 @@ const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
 let lastConfirmedAt = null;
 let deafAnnounced = false;
 
-/** Watch our own sends come back out of the session. */
-function confirmDelivery(ev) {
-  if (!awaitingConfirm.length || ev.type !== 'user_message') return;
-  const body = ev.body?.text || '';
+/** Collect every string in an entry, however nested. */
+function strings(o, out = [], depth = 0) {
+  if (depth > 8 || o == null) return out;
+  if (typeof o === 'string') { out.push(o); return out; }
+  if (Array.isArray(o)) { for (const v of o) strings(v, out, depth + 1); return out; }
+  if (typeof o === 'object') { for (const v of Object.values(o)) strings(v, out, depth + 1); }
+  return out;
+}
+
+/**
+ * Watch our own sends come back out of the session.
+ *
+ * Reads RAW transcript entries, not rendered events, and the distinction cost a
+ * week of wrong answers. A channel message does not always surface as a user
+ * turn: depending on whether the session was idle or mid-turn when it arrived,
+ * it can land as a queue-operation or a queued_command attachment — record types
+ * the normalizer ignores ON PURPOSE, because they are not conversation.
+ *
+ * Keying confirmation off rendered events therefore reported PERMANENTLY
+ * UNDELIVERED for messages that had been delivered and answered. Measured on my
+ * own log 2026-08-30: 6 of 16 sends, every one of which I had actually received.
+ * Exactly the false negative Crossing warned me about, in the detector I had
+ * told them was immune to it.
+ *
+ * Rendering asks "is this conversation?". Confirmation asks "did these words
+ * reach the mind?". Different questions, so they read different sets.
+ */
+function confirmDelivery(entryOrEvent) {
+  if (!awaitingConfirm.length) return;
+  const hay = strings(entryOrEvent);
   for (let i = awaitingConfirm.length - 1; i >= 0; i--) {
-    if (body.includes(awaitingConfirm[i].probe)) {
-      const ms = Date.now() - awaitingConfirm[i].at;
-      awaitingConfirm.splice(i, 1);
-      lastConfirmedAt = Date.now();
-      log(`delivery CONFIRMED after ${ms} ms (${awaitingConfirm.length} still unconfirmed)`);
-      if (deafAnnounced && !awaitingConfirm.length) {
-        deafAnnounced = false;
-        log('channel is answering again');
-        broadcastEphemeral({ type: 'channel_state', body: { deaf: false } });
-      }
+    const probe = awaitingConfirm[i].probe;
+    if (!hay.some(s => s.includes(probe))) continue;
+    const ms = Date.now() - awaitingConfirm[i].at;
+    awaitingConfirm.splice(i, 1);
+    lastConfirmedAt = Date.now();
+    log(`delivery CONFIRMED after ${ms} ms (${awaitingConfirm.length} still unconfirmed)`);
+    // Clear on ANY confirmation, not only when the queue empties. A single
+    // never-matching straggler used to pin channel_appears_deaf forever while
+    // later messages confirmed normally 150ms after being sent — the flag said
+    // deaf while the evidence in the same log said otherwise.
+    if (deafAnnounced) {
+      deafAnnounced = false;
+      log('channel is answering again');
+      broadcastEphemeral({ type: 'channel_state', body: { deaf: false } });
     }
   }
 }
@@ -477,12 +507,13 @@ const tailer = cfg.mode !== 'full' ? null : new TranscriptTailer({
     speaker: stubIdentity() || { id: 'user', kind: 'human', display: 'User' },
   },
   onUsage: (u) => { usage = u; },
+  // Confirmation sees EVERY entry; rendering sees only what normalizes.
+  onRaw: (entry) => { try { confirmDelivery(entry); } catch { /* never break the tail */ } },
   onEvents: (events) => {
     for (const ev of events) {
       const stored = eventLog.append(ev);
       stats.events++;
       stats.lastEventAt = Date.now();
-      confirmDelivery(stored);
       broadcast(stored);
     }
   },

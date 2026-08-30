@@ -30,8 +30,15 @@ export class TranscriptTailer {
    * @param {(events: object[]) => void} opts.onEvents
    * @param {(msg: string) => void} [opts.log]
    */
-  constructor({ transcriptPath, ctx, onEvents, onUsage = () => {}, log = () => {}, stateFile = '' }) {
+  constructor({ transcriptPath, ctx, onEvents, onUsage = () => {}, onRaw = () => {},
+                log = () => {}, stateFile = '' }) {
     this.onUsage = onUsage;
+    // Every parsed entry, BEFORE normalization decides whether it is
+    // conversation. Delivery confirmation needs a wider view than rendering
+    // does: a channel message can surface as a queue-operation or an
+    // attachment, which the normalizer deliberately ignores, and keying
+    // confirmation off rendered events made those look permanently undelivered.
+    this.onRaw = onRaw;
     // Byte offsets persisted across restarts. Without this, every restart made
     // each subagent file look newly-discovered and re-ingested it from byte 0 —
     // twelve transcripts times twenty-five restarts, all appended again.
@@ -175,6 +182,8 @@ export class TranscriptTailer {
       let entry;
       try { entry = JSON.parse(line); }
       catch { continue; } // unparseable: skip, never fatal (Law 4.2)
+      try { this.onRaw(entry); }
+      catch (err) { this.log(`onRaw error: ${err.message}`); }
       try { out.push(...normalizeEntry(entry, state.ctx)); }
       catch (err) { this.log(`normalize error: ${err.message}`); }
       // Context accounting rides along in the transcript — no statusline
