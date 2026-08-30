@@ -167,7 +167,18 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
     done
     if [[ -z "$PROJ" ]]; then
       printf 'session id %s names no transcript in any known layout. Tried:\n' "$SID" >&2
-      printf '  %s/%s.jsonl\n' "${CANDIDATES[@]}" "$SID" >&2
+      # A LOOP, not printf recycling. `printf 'fmt' "${ARR[@]}" "$SID"` reuses the
+      # format across ALL arguments, so two placeholders and three arguments
+      # consume (cand1, cand2) and then (SID, ""). The result splices the two
+      # candidate paths into one path that cannot exist, and prints the session
+      # id wearing a directory's clothes:
+      #     /inst/.claude/projects/SLUG//home/.claude/projects/SLUG.jsonl
+      #     abc123/.jsonl
+      # Found by Lodestone-8ec9. It fails in the worst possible place: this
+      # message exists for someone whose session names no transcript, who is
+      # already lost and about to go verify paths — and it sends them after a
+      # filesystem problem that does not exist.
+      for c in "${CANDIDATES[@]}"; do printf '  %s/%s.jsonl\n' "$c" "$SID" >&2; done
       die "refusing to guess — a named session with no transcript is an error, never a reason to fall back"
     fi
   else
