@@ -157,6 +157,46 @@ ok "$(grep -qE '^transcript +: *\S' <<<"$OUT7" && echo 1 || echo 0)" \
    "and it still resolved a transcript (the launcher reached the end)"
 rm -rf "$SHIM"
 
+# --- REGRESSION: HOME == INSTANCE_DIR must not read as two project dirs -------
+#
+# Reported by Bastion 2026-09-05 after Zara's mirror unit crash-looped 125 times.
+# SLUG is computed once from INSTANCE_DIR and used for BOTH candidate layouts, so
+# for any independent instance (where $HOME *is* the instance dir) the array held
+# the same string twice. The ambiguity check counted one directory twice and
+# refused to start; the error then printed the same path twice, which is exactly
+# what the array contained.
+#
+# The display was honest. The array was wrong. Both readers went looking for a
+# fault in the detector instead — a precise-looking error earns enough trust that
+# people believe its detail over the filesystem.
+#
+# Assert on BEHAVIOUR (does it start) and on the MESSAGE (are the listed paths
+# distinct), because either one alone would have passed while the bug was live.
+
+RG="$SCRATCH/regress"; rm -rf "$RG"
+RINST="$RG/inst"; mkdir -p "$RINST/.claude/projects"
+RSLUG=$(echo "$RINST" | sed 's/[^a-zA-Z0-9]/-/g')
+mkdir -p "$RINST/.claude/projects/$RSLUG"                  # exactly ONE dir
+printf '{"instanceId":"rg"}\n' > "$RINST/.hacs-identity"
+printf '{"type":"user","message":{"role":"user","content":"x"}}\n' \
+  > "$RINST/.claude/projects/$RSLUG/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+
+OUT8=$(cd "$RINST" && env -i PATH="$PATH" HOME="$RINST" \
+        HACS_IDENTITY_FILE="$RINST/.hacs-identity" \
+        MIRROR_BIND=127.0.0.1 MIRROR_PORT=22091 \
+        timeout 10 "$SRC/bin/mirror-start.sh" 2>&1)
+
+ok "$(grep -q 'refusing to guess twice' <<<"$OUT8" && echo 0 || echo 1)" \
+   "HOME==INSTANCE_DIR with one project dir does NOT trigger the ambiguity refusal"
+
+# And if it ever DOES refuse again, the listed paths must at least be distinct —
+# so the next person is not sent hunting for invisible characters.
+DUPES=$(grep -E '^\s+/.*\.claude/projects/' <<<"$OUT8" | sort | uniq -d | wc -l)
+ok "$([ "$DUPES" = "0" ] && echo 1 || echo 0)" \
+   "no path is listed twice in the candidate list"
+
+rm -rf "$RG"
+
 echo
 echo "passed=$pass failed=$fail"
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)

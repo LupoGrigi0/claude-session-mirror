@@ -171,6 +171,29 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
   # resolves to exactly where his transcripts are.)
   CANDIDATES=("$INSTANCE_DIR/.claude/projects/$SLUG" "$HOME/.claude/projects/$SLUG")
 
+  # DEDUPLICATE, and this is not tidying — it is a correctness fix.
+  #
+  # For every independent instance $HOME *is* $INSTANCE_DIR, so the two layouts
+  # above collapse to the SAME STRING. The ambiguity check below then counts one
+  # directory twice, declares AMBIGUOUS, and refuses to start on a layout that is
+  # perfectly unambiguous. The error printed the same path twice because that is
+  # genuinely what the array held — the display was honest, the array was wrong.
+  #
+  # Cost, measured by Bastion 2026-09-05: Zara's mirror unit crash-looped 125
+  # times. Two experienced readers (Lupo and Bastion) both read the duplicate
+  # path list and went hunting for a bug in the DETECTOR — invisible characters,
+  # unicode lookalikes — because a precise-looking error earns enough trust that
+  # people believe its detail over the filesystem.
+  #
+  # Bash 3.2 compatible (Windows/git-bash): no associative arrays.
+  _seen=""; _uniq=()
+  for c in "${CANDIDATES[@]}"; do
+    case "$_seen" in *"|$c|"*) continue ;; esac
+    _seen="$_seen|$c|"; _uniq+=("$c")
+  done
+  CANDIDATES=("${_uniq[@]}")
+  unset _seen _uniq
+
   # ---- which transcript? A TRUST LADDER, not a guess ---------------------------
   #
   # 1. CLAUDE_CODE_SESSION_ID from our own environment. Authoritative: it is the
