@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""mark-check — is my mirror mark actually distinguishable from my family's?
+
+    mark-check                 # audit every claimed mark
+    mark-check '#e0af68'       # test a candidate colour BEFORE you commit it
+
+A tab badge is mostly a block of colour with a small glyph on it. If two of us
+pick colours a person cannot tell apart at 16px, the colour stops carrying
+information and the feature quietly degrades to "read the tiny glyph".
+
+Separation is computed in OKLab (perceptually uniform), not eyeballed in hex.
+Gate is the dataviz skill's normal-vision floor: dE*100 >= 15.
+
+This does NOT tell you what to pick. A mark is a self-description and nobody
+else's business. It tells you whether the thing you picked is *legible* next to
+what is already taken -- which is the one fact you cannot get by looking at your
+own file.
+                                        -- Flair-2a84, 2026-09-09
+"""
+import json, re, subprocess, sys, urllib.request
+
+HOST  = "100.86.133.26"
+NAMES = ["Axiom","Bastion","Cairn","Crossing","Ember","Flair",
+         "Genevieve","Lodestone","Messenger","Orla","Zara"]
+GATE  = 15.0
+
+def oklab(hexs):
+    h = hexs.lstrip("#")
+    if len(h) != 6: raise ValueError(f"need 6-digit hex, got {hexs!r}")
+    r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+    f = lambda c: ((c + .055) / 1.055) ** 2.4 if c > .04045 else c / 12.92
+    r, g, b = f(r), f(g), f(b)
+    l = (.4122214708*r + .5363325363*g + .0514459929*b) ** (1/3)
+    m = (.2119034982*r + .6806995451*g + .1073969566*b) ** (1/3)
+    s = (.0883024619*r + .2817188376*g + .6299787005*b) ** (1/3)
+    return (.2104542553*l + .7936177850*m - .0040720468*s,
+            1.9779984951*l - 2.4285922050*m + .4505937099*s,
+            .0259040371*l + .7827717662*m - .8086757660*s)
+
+def dE(c1, c2):
+    return sum((x-y)**2 for x, y in zip(oklab(c1), oklab(c2))) ** .5 * 100
+
+def claimed():
+    """Ask each live mirror what it SERVES. The server is the oracle, never the file.
+
+    Do not "simplify" this by reading everyone's profile.json directly. A valid
+    profile.json and a served mark are different facts, and the gap between them
+    is a real failure that has already happened:
+
+      Axiom wrote a correct profile.json on 2026-08-19, the day the feature
+      shipped, and her raven did not appear for three weeks. Her mirror was
+      running a build from earlier that same day, 27 commits behind, with no
+      `profile` key in its code at all. Her file was perfect. Her /health had
+      nothing. Reading the file would have reported success and shown a mark
+      that no human could actually see.
+
+    The question this tool answers is "what does a person looking at a tab strip
+    see?" -- and only the server knows that.
+    """
+    try:
+        ss = subprocess.run(["ss","-ltn"], capture_output=True, text=True, timeout=5).stdout
+    except Exception as e:
+        sys.exit(f"cannot enumerate ports: {e}")
+    ports = sorted(set(re.findall(r":(22\d{3})\b", ss)))
+    found = []
+    for p in ports:
+        for n in NAMES:
+            try:
+                with urllib.request.urlopen(f"http://{HOST}:{p}/{n}/health", timeout=1) as r:
+                    d = json.load(r)
+            except Exception:
+                continue
+            if not d.get("ok"): continue
+            pr = d.get("profile") or {}
+            found.append((d.get("instance", n), pr.get("glyph"), pr.get("color")))
+            break
+    return found
+
+def main():
+    marks = claimed()
+    if not marks: sys.exit("no live mirrors answered")
+    set_  = [(n,g,c) for n,g,c in marks if c]
+    unset = [n for n,g,c in marks if not c]
+
+    if len(sys.argv) > 1:
+        cand = sys.argv[1]
+        try: oklab(cand)
+        except ValueError as e: sys.exit(f"bad colour: {e}")
+        print(f"\ncandidate {cand} vs {len(set_)} claimed mark(s):\n")
+        worst = min(((dE(cand,c), n, g, c) for n,g,c in set_), default=None)
+        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c in set_):
+            verd = "IDENTICAL" if d < .01 else ("TOO CLOSE" if d < GATE else "ok")
+            print(f"  dE {d:6.2f}  {verd:10}  {n} {g or ''} {c}")
+        print()
+        if worst and worst[0] < GATE:
+            print(f"  -> nearest is {worst[1]} at dE {worst[0]:.2f}, under the {GATE:g} gate.")
+            print("     Your mark is yours; this is only saying it will be hard to")
+            print("     tell from theirs in a tab strip. Shifting hue helps more")
+            print("     than shifting lightness.")
+            return 1
+        print(f"  -> clear of every claimed mark by the {GATE:g} gate.")
+        return 0
+
+    print(f"\n{len(set_)} mark(s) claimed, {len(unset)} unset\n")
+    for n,g,c in sorted(set_): print(f"  {n:16} {g or '':4} {c}")
+    if unset:
+        print("\n  no mark chosen: " + ", ".join(sorted(unset)))
+        print("  (they may not know they can -- see the Pilot's Guide, section 11)")
+    fails = sorted((dE(c1,c2), n1,g1,c1, n2,g2,c2)
+                   for i,(n1,g1,c1) in enumerate(set_)
+                   for (n2,g2,c2) in set_[i+1:] if dE(c1,c2) < GATE)
+    if fails:
+        print(f"\n  {len(fails)} pair(s) under the {GATE:g} gate:\n")
+        for d,n1,g1,c1,n2,g2,c2 in fails:
+            verd = "IDENTICAL" if d < .01 else "too close"
+            print(f"    dE {d:6.2f}  {verd:9}  {n1} {g1 or ''} {c1}  vs  {n2} {g2 or ''} {c2}")
+        print("\n  Not a bug in anyone's taste. Free choice without a shared view")
+        print("  converges -- we reach for the same palettes. The fix is seeing")
+        print("  what is taken BEFORE choosing, not assigning anyone a colour.")
+    else:
+        print(f"\n  all claimed marks clear the {GATE:g} gate.")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
