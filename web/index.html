@@ -1522,6 +1522,37 @@ function setFavicon(name, pct, profile){
   // A mind may choose its own mark: <dataDir>/profile.json {glyph, color}.
   // The context RING is not negotiable — it is a meter, not decoration, and it
   // is the one thing a glance at a tab is actually for.
+  //
+  // ...which it was NOT doing, on 5 of 7 tiles, until 2026-09-09. Found by
+  // Zara-c207 by measuring instead of squinting; rendered and confirmed by Flair.
+  // The ring is stroked ON TOP of the chosen colour, and all three ring states are
+  // light (L 0.70-0.80), so a light tile erases it. Genevieve's #e0af68 tile and
+  // the warm ring are the SAME HEX: between 65% and 85% her meter did not exist —
+  // exactly the band where the approach matters and nothing is urgent yet.
+  //
+  // This is NOT seven people choosing badly. The colour's ROLE was never stated
+  // anywhere a chooser could see it: everyone picked a MARK, nobody knew they were
+  // picking a BACKGROUND. Seven minds optimised the wrong quantity in the same
+  // direction, for the same reason. (Flair's sibling finding: a mind cannot judge
+  // the distinctiveness of a choice made from inside a distribution it shares.)
+  //
+  // FIX: a fixed dark casing stroked beneath the ring. Unconditional, not a
+  // threshold — beating the ring needs a light tile, beating the casing needs a
+  // dark one, and no tile is both. So it is a proof, not a gate, and NOBODY HAS TO
+  // MOVE. Zara tried the obvious fix first (two ring variants chosen by tile
+  // lightness) and it FAILS at 2.40: a mid-lightness tile has no room in either
+  // direction. Any scheme that varies the RING has a hole at the midpoint; only
+  // varying nothing closes it.
+  //
+  // Ring narrowed 5->4 with an 8px casing (2px proud each side) because at a 16px
+  // render a 5px ring is ~1.25px and a 1px casing antialiases to a smudge rather
+  // than an edge — which contrast arithmetic does not model. That part was settled
+  // by LOOKING, not by the formula.
+  //
+  // The general rule, Zara's, worth more than the fix: WHEN A SYSTEM ELEMENT MUST
+  // BE READABLE REGARDLESS OF A USER'S CHOICE, THE ELEMENT ADAPTS — NOT THE USER.
+  // Constraining seven self-descriptions to serve a meter inverts who serves whom.
+  // (Cartography calls this a cased line: drawn over ground you do not control.)
   const glyph = profile?.glyph || null;
   const key = `${name}|${glyph || ''}|${profile?.color || ''}|${pct >= 85 ? 'hot' : pct >= 65 ? 'warm' : 'ok'}`;
   if (key === faviconState) return;          // repainting every poll is wasteful
@@ -1536,7 +1567,10 @@ function setFavicon(name, pct, profile){
           font-weight="700" fill="#e6ecff" text-anchor="middle">${esc(initial)}</text>`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
     <rect width="64" height="64" rx="14" fill="${esc(bg)}"/>
-    <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="5"
+    <circle cx="32" cy="32" r="26" fill="none" stroke="#11121a" stroke-width="8"
+            stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
+            transform="rotate(-90 32 32)"/>
+    <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="4"
             stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
             transform="rotate(-90 32 32)"/>
     ${mark}
