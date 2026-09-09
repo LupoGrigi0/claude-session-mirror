@@ -440,14 +440,49 @@ function gitCommit() {
     return fs.readFileSync(path.join(SRC_DIR, '..', '.git', m[1]), 'utf8').trim().slice(0, 12);
   } catch { return null; }
 }
+// web/ is served FROM DISK PER REQUEST, so it has completely different update
+// semantics from src/ — a web change is live the moment it lands, and a src change
+// needs a restart. Reporting one number for both claims a coherence the deployment
+// does not have.
+//
+// Found by Zara-c207, 2026-09-09, immediately after pulling the favicon casing fix:
+// /health kept reporting the boot commit with restart_required=false while the new
+// page was demonstrably being served. The endpoint was correct about the question it
+// asked — "has the code THIS PROCESS executes changed" — and wrong about the question
+// anyone actually asks it, which is "am I serving the current thing".
+//
+// Worse in one direction, and this is why it is not cosmetic: BEFORE a pull it says
+// old, which is right by accident. AFTER a pull it still says old, which is wrong,
+// and that is the state everyone is in. Someone pulls, checks /health to confirm,
+// concludes the fix did not land, and asks for a restart they do not need.
+//
+// Fix is Zara's second option, deliberately: report BOTH and let them differ
+// visibly, because they genuinely can differ and hiding that is how this happened.
+function webFingerprint() {
+  const parts = [];
+  try {
+    const dir = path.join(SRC_DIR, '..', 'web');
+    for (const f of fs.readdirSync(dir).sort()) {
+      const st = fs.statSync(path.join(dir, f));
+      if (st.isFile()) parts.push(`${f}:${st.size}:${Math.floor(st.mtimeMs)}`);
+    }
+  } catch { /* unreadable — report what we have */ }
+  return parts.join('|');
+}
 const bootFingerprint = srcFingerprint();
+const bootWebFingerprint = webFingerprint();
 const bootCommit = gitCommit();
 let srcChangedAt = null;
+let webChangedAt = null;
 setInterval(() => {
-  if (srcChangedAt) return;                        // already known; stop stat-ing
-  if (srcFingerprint() !== bootFingerprint) {
+  if (!srcChangedAt && srcFingerprint() !== bootFingerprint) {
     srcChangedAt = Date.now();
     log('SOURCE CHANGED ON DISK — this process is running the OLD code. Restart to apply.');
+  }
+  // NOT a restart condition. Stated positively so nobody reads it as one.
+  if (!webChangedAt && webFingerprint() !== bootWebFingerprint) {
+    webChangedAt = Date.now();
+    log('web/ changed on disk — already being served, no restart needed.');
   }
 }, 30000).unref();
 
@@ -1287,9 +1322,15 @@ const server = http.createServer(async (req, res) => {
       profile: readProfile(),
       // What this PROCESS is running, and whether the disk has moved under it.
       version: {
-        commit: bootCommit,
+        commit: bootCommit,                        // what THIS PROCESS booted from
+        commit_on_disk: gitCommit(),               // what the checkout is NOW
         src_changed_on_disk: Boolean(srcChangedAt),
-        restart_required: Boolean(srcChangedAt),
+        restart_required: Boolean(srcChangedAt),   // ONLY src. web is live.
+        // web/ is read per request, so a change here is ALREADY SERVED. Reported
+        // separately because conflating it with src made /health say "old" to
+        // someone who had just successfully deployed. — Zara-c207's finding.
+        web_changed_on_disk: Boolean(webChangedAt),
+        web_is_live: true,
       },
       epoch: eventLog.epoch,
       seq: eventLog.seq,
