@@ -279,6 +279,34 @@ const DEAF_POLL_MS  = Math.min(15000, Math.max(500, Math.round(DEAF_AFTER_MS / 3
 // How long the transcript must be SILENT before an unconfirmed send counts as
 // deafness rather than backlog. Scales with the deaf threshold so the test can
 // exercise both at speed.
+//
+// WHY THIS GATE EXISTS — corrected 2026-09-09, because the reason recorded here
+// for two weeks was a description of the symptom, not the cause.
+//
+// I first shipped a flat 90s timeout and it screamed "never arrived" during long
+// agent runs. I filed that as "a busy session is not a deaf one" and moved on.
+// That is what it LOOKED like. The actual mechanism is Zara-c207's fourth door:
+//
+//   A SAMPLED MEASUREMENT IS NOT WRONG BETWEEN SAMPLES — IT IS NOT YET TRUE.
+//
+// An inbound message surfaces at a TURN BOUNDARY. Crossing measured enqueue->
+// surface at 45 seconds. So the flat timeout was not misjudging busyness; it was
+// READING THE CHANNEL FASTER THAN THE CHANNEL SAMPLES, with the sampling interval
+// sitting in someone else's measurement the whole time.
+//
+// The four doors, all of which render identically as "no answer":
+//   absent          the value is not there
+//   unreadable      I could not reach it
+//   undiscoverable  nothing told me it existed                  (Genevieve)
+//   NOT YET SAMPLED I looked faster than the instrument does    (Zara-c207)
+//
+// The fourth is the only one that fixes itself if you wait, which makes it the
+// cheapest to rule out and the easiest to skip. This gate is what ruling it out
+// looks like in code.
+//
+// Zara's note on why re-labelling beat adding an entry: "a taxonomy that only
+// catches new mistakes is a filing system; one that re-files an old entry
+// correctly is doing the work."
 const QUIET_BEFORE_DEAF_MS = Math.max(2000, Math.round(DEAF_AFTER_MS / 3));
 const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
 let lastConfirmedAt = null;
