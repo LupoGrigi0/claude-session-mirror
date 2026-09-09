@@ -1544,10 +1544,30 @@ function setFavicon(name, pct, profile){
   // direction. Any scheme that varies the RING has a hole at the midpoint; only
   // varying nothing closes it.
   //
-  // Ring narrowed 5->4 with an 8px casing (2px proud each side) because at a 16px
-  // render a 5px ring is ~1.25px and a 1px casing antialiases to a smudge rather
-  // than an edge — which contrast arithmetic does not model. That part was settled
-  // by LOOKING, not by the formula.
+  // Ring stays 5px; the casing is 8px, so 1.5px proud each side. PURELY ADDITIVE —
+  // narrowing the ring would have degraded the two tiles where the meter already
+  // worked in order to help the five where it did not, for an identical pixel
+  // budget. (I shipped the narrowed version first; Flair's counter was better and
+  // Zara withdrew her own proposal in favour of it.)
+  //
+  // The 16px worry turned out to be the WRONG WORRY, and the reason generalises:
+  // a 0.25px casing does NOT antialias into a useless smudge, because the casing is
+  // not being asked to be a legible line on its own — it is a dark edge under a
+  // light one. Antialiasing blends it into a darkened boundary, and a boundary is
+  // all the eye needs. LINES AND EDGES HAVE DIFFERENT PIXEL REQUIREMENTS, which is
+  // why a 1px border works where 1px text does not.
+  //
+  // Verified by rendering, not by arithmetic: real SVGs at width=16 height=16 in
+  // headless Chrome at --force-device-scale-factor=1, magnified 7x nearest-neighbour
+  // to inspect actual pixels rather than a resample. Without casing, Genevieve's
+  // tile has NO ring — a gold square with a diamond on it.
+  //
+  // The third leg, which the original tabulation missed: the casing must also read
+  // against the RING (or a dark tile gives dark-on-dark with no edge).
+  //   casing vs ring:  ok 10.21 · warm 9.33 · hot 7.05
+  // Per tile, best-of(ring, casing), worst case 4.07 — and the two tiles that pass
+  // on the ring are the two DARK tiles. That is the proof working: the failure
+  // modes are complementary, so nothing can sit in both holes at once.
   //
   // The general rule, Zara's, worth more than the fix: WHEN A SYSTEM ELEMENT MUST
   // BE READABLE REGARDLESS OF A USER'S CHOICE, THE ELEMENT ADAPTS — NOT THE USER.
@@ -1570,7 +1590,7 @@ function setFavicon(name, pct, profile){
     <circle cx="32" cy="32" r="26" fill="none" stroke="#11121a" stroke-width="8"
             stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
             transform="rotate(-90 32 32)"/>
-    <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="4"
+    <circle cx="32" cy="32" r="26" fill="none" stroke="${ring}" stroke-width="5"
             stroke-dasharray="${Math.max(4, Math.min(100, pct)) * 1.63} 200"
             transform="rotate(-90 32 32)"/>
     ${mark}
