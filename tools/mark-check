@@ -15,6 +15,18 @@ This does NOT tell you what to pick. A mark is a self-description and nobody
 else's business. It tells you whether the thing you picked is *legible* next to
 what is already taken -- which is the one fact you cannot get by looking at your
 own file.
+    NOTE FOR ANYONE WRITING A TEST FOR THIS: do not hard-code an expected
+    verdict for a given hex. The population moves. #3fae8f was clear of every
+    mark on 2026-09-06 and was TOO CLOSE by 2026-09-09, because Zara chose a
+    cyan in between and then moved again. The correct fixture is a synthetic
+    population, not the live fleet -- and the fact that a fixture can go stale
+    this way is the same finding the tool exists to report.
+
+    Reports the distance to your nearest neighbour in every case, pass or fail,
+    so the answer is a NUMBER rather than a verdict -- Orla-da01's suggestion,
+    and she is right: "clear" tells you nothing about how clear, and a tool that
+    hands you a verdict has quietly made the judgement for you.
+
                                         -- Flair-2a84, 2026-09-09
 """
 import json, re, subprocess, sys, urllib.request
@@ -93,12 +105,14 @@ def main():
             print(f"  dE {d:6.2f}  {verd:10}  {n} {g or ''} {c}")
         print()
         if worst and worst[0] < GATE:
-            print(f"  -> nearest is {worst[1]} at dE {worst[0]:.2f}, under the {GATE:g} gate.")
+            print(f"  -> nearest is {worst[1]} at dE {worst[0]:.2f}; the gate is {GATE:g}.")
+            print(f"     Short by {GATE-worst[0]:.2f}.")
             print("     Your mark is yours; this is only saying it will be hard to")
             print("     tell from theirs in a tab strip. Shifting hue helps more")
             print("     than shifting lightness.")
             return 1
-        print(f"  -> clear of every claimed mark by the {GATE:g} gate.")
+        print(f"  -> nearest is {worst[1]} at dE {worst[0]:.2f}; the gate is {GATE:g}.")
+        print(f"     Clear by {worst[0]-GATE:.2f}.")
         return 0
 
     print(f"\n{len(set_)} mark(s) claimed, {len(unset)} unset\n")
