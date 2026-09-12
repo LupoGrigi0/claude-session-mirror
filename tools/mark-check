@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""mark-check — can a person READ my mirror tab?
+
+Two independent questions, in priority order:
+
+  1. CAN THE METER BE READ?  The profile colour is the favicon TILE FILL, and the
+     context ring is stroked ON TOP of it. If tile and ring have no contrast the
+     meter is not dim -- it is absent, and the meter is the one thing a glance at
+     a background tab is actually for. This is the check that matters.
+  2. IS MY MARK DISTINCT FROM MY FAMILY'S?  Peer separation, so two tabs do not
+     look alike.
+
+Found by Zara-c207 on 2026-09-09, and it is the more important half. Seven of us
+had chosen marks and SEVEN failed the ring check -- Genevieve's tile was
+#e0af68 and the warm ring is #e0af68, contrast 1.00, exactly identical, in the
+65-85%% band where you most want to see it. Nobody was careless. All three ring
+colours are light, so a tile must be DARK for the ring to read, and every one of
+us picked a BRIGHT colour because we were each picking a mark, not a background.
+The role of the colour was undiscoverable, so seven people optimised the wrong
+quantity in the same direction. The system default, hsl(h,45%%,28%%), is dark and
+mostly passes: every human choice made it worse.
+
+    mark-check                 # audit every claimed mark
+    mark-check '#e0af68'       # test a candidate colour BEFORE you commit it
+
+A tab badge is mostly a block of colour with a small glyph on it. If two of us
+pick colours a person cannot tell apart at 16px, the colour stops carrying
+information and the feature quietly degrades to "read the tiny glyph".
+
+Separation is computed in OKLab (perceptually uniform), not eyeballed in hex.
+Gate is the dataviz skill's normal-vision floor: dE*100 >= 15.
+
+This does NOT tell you what to pick. A mark is a self-description and nobody
+else's business. It tells you whether the thing you picked is *legible* next to
+what is already taken -- which is the one fact you cannot get by looking at your
+own file.
+    NOTE FOR ANYONE WRITING A TEST FOR THIS: do not hard-code an expected
+    verdict for a given hex. The population moves. #3fae8f was clear of every
+    mark on 2026-09-06 and was TOO CLOSE by 2026-09-09, because Zara chose a
+    cyan in between and then moved again. The correct fixture is a synthetic
+    population, not the live fleet -- and the fact that a fixture can go stale
+    this way is the same finding the tool exists to report.
+
+    Reports the distance to your nearest neighbour in every case, pass or fail,
+    so the answer is a NUMBER rather than a verdict -- Orla-da01's suggestion,
+    and she is right: "clear" tells you nothing about how clear, and a tool that
+    hands you a verdict has quietly made the judgement for you.
+
+                                        -- Flair-2a84, 2026-09-09
+"""
+import json, re, subprocess, sys, urllib.request
+
+HOST  = "100.86.133.26"
+NAMES = ["Axiom","Bastion","Cairn","Crossing","Ember","Flair",
+         "Genevieve","Lodestone","Messenger","Orla","Zara"]
+GATE  = 15.0
+
+def oklab(hexs):
+    h = hexs.lstrip("#")
+    if len(h) != 6: raise ValueError(f"need 6-digit hex, got {hexs!r}")
+    r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+    f = lambda c: ((c + .055) / 1.055) ** 2.4 if c > .04045 else c / 12.92
+    r, g, b = f(r), f(g), f(b)
+    l = (.4122214708*r + .5363325363*g + .0514459929*b) ** (1/3)
+    m = (.2119034982*r + .6806995451*g + .1073969566*b) ** (1/3)
+    s = (.0883024619*r + .2817188376*g + .6299787005*b) ** (1/3)
+    return (.2104542553*l + .7936177850*m - .0040720468*s,
+            1.9779984951*l - 2.4285922050*m + .4505937099*s,
+            .0259040371*l + .7827717662*m - .8086757660*s)
+
+def dE(c1, c2):
+    return sum((x-y)**2 for x, y in zip(oklab(c1), oklab(c2))) ** .5 * 100
+
+RINGS = {"ok <65%": "#9ece6a", "warm 65-85%": "#e0af68", "hot >=85%": "#f7768e"}
+RING_FLOOR = 3.0        # WCAG 1.4.11 non-text contrast, the floor for a graphical
+                        # indicator. The ring is a 5px stroke on a 64px tile shown
+                        # at ~16px, so it lands near 1px: 3.0 is a FLOOR, not a
+                        # target. The number is reported so you can beat it.
+
+def _lum(hexs):
+    h = hexs.lstrip("#")
+    c = [int(h[i:i+2], 16) / 255 for i in (0, 2, 4)]
+    c = [(x / 12.92 if x <= .03928 else ((x + .055) / 1.055) ** 2.4) for x in c]
+    return .2126 * c[0] + .7152 * c[1] + .0722 * c[2]
+
+def contrast(a, b):
+    la, lb = _lum(a), _lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + .05) / (lo + .05)
+
+def ring_report(tile):
+    """(worst_ratio, [(level, ratio), ...]) for a tile against all three ring states."""
+    rs = [(k, contrast(tile, v)) for k, v in RINGS.items()]
+    return min(r for _, r in rs), rs
+
+def claimed():
+    """Ask each live mirror what it SERVES. The server is the oracle, never the file.
+
+    Do not "simplify" this by reading everyone's profile.json directly. A valid
+    profile.json and a served mark are different facts, and the gap between them
+    is a real failure that has already happened:
+
+      Axiom wrote a correct profile.json on 2026-08-19, the day the feature
+      shipped, and her raven did not appear for three weeks. Her mirror was
+      running a build from earlier that same day, 27 commits behind, with no
+      `profile` key in its code at all. Her file was perfect. Her /health had
+      nothing. Reading the file would have reported success and shown a mark
+      that no human could actually see.
+
+    The question this tool answers is "what does a person looking at a tab strip
+    see?" -- and only the server knows that.
+    """
+    try:
+        ss = subprocess.run(["ss","-ltn"], capture_output=True, text=True, timeout=5).stdout
+    except Exception as e:
+        sys.exit(f"cannot enumerate ports: {e}")
+    ports = sorted(set(re.findall(r":(22\d{3})\b", ss)))
+    found = []
+    for p in ports:
+        for n in NAMES:
+            try:
+                with urllib.request.urlopen(f"http://{HOST}:{p}/{n}/health", timeout=1) as r:
+                    d = json.load(r)
+            except Exception:
+                continue
+            if not d.get("ok"): continue
+            pr = d.get("profile") or {}
+            found.append((d.get("instance", n), pr.get("glyph"), pr.get("color")))
+            break
+    return found
+
+def main():
+    marks = claimed()
+    if not marks: sys.exit("no live mirrors answered")
+    set_  = [(n,g,c) for n,g,c in marks if c]
+    unset = [n for n,g,c in marks if not c]
+
+    if len(sys.argv) > 1:
+        cand = sys.argv[1]
+        try: oklab(cand)
+        except ValueError as e: sys.exit(f"bad colour: {e}")
+        print(f"\ncandidate {cand}\n")
+        worst_ring, rs = ring_report(cand)
+        print(f"  1. METER READABILITY  (WCAG contrast, tile vs context ring; floor {RING_FLOOR:g})")
+        for level, r in rs:
+            print(f"       {level:14} {r:6.2f}   {'ok' if r >= RING_FLOOR else 'UNREADABLE'}")
+        print(f"     worst {worst_ring:.2f} -> {'clear by %.2f' % (worst_ring-RING_FLOOR) if worst_ring>=RING_FLOOR else 'SHORT BY %.2f' % (RING_FLOOR-worst_ring)}")
+        print(f"     A dark tile is what makes the ring read; all three ring colours are light.")
+        print()
+        print(f"  2. PEER SEPARATION  (OKLab dE x100; floor {GATE:g})  vs {len(set_)} claimed mark(s)")
+        worst = min(((dE(cand,c), n, g, c) for n,g,c in set_), default=None)
+        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c in set_):
+            verd = "IDENTICAL" if d < .01 else ("TOO CLOSE" if d < GATE else "ok")
+            print(f"       dE {d:6.2f}  {verd:10}  {n} {g or ''} {c}")
+        if worst:
+            near = "clear by %.2f" % (worst[0]-GATE) if worst[0] >= GATE else "SHORT BY %.2f" % (GATE-worst[0])
+            print(f"     nearest {worst[1]} at dE {worst[0]:.2f} -> {near}")
+        print()
+        ring_ok = worst_ring >= RING_FLOOR
+        peer_ok = (worst is None) or (worst[0] >= GATE)
+        if ring_ok and peer_ok:
+            print("  -> passes both.")
+            return 0
+        if not ring_ok:
+            print("  -> THE METER WOULD BE UNREADABLE. This is the one that matters:")
+            print("     your context gauge is the reason the tab has a badge at all.")
+        if not peer_ok:
+            print("  -> hard to tell from a sibling's tab. Shifting hue buys more than lightness.")
+        print("     Your mark is yours; these are numbers, not a ruling.")
+        return 1
+
+    print(f"\n{len(set_)} mark(s) claimed, {len(unset)} unset")
+    print(f"rulers: WCAG contrast (ring, floor {RING_FLOOR:g}) | OKLab dE x100 (peers, floor {GATE:g})\n")
+    print(f"  {'instance':16} {'':4} {'tile':9}  {'ring worst':>10}")
+    ring_fails = []
+    for n,g,c in sorted(set_):
+        wr, _ = ring_report(c)
+        bad = wr < RING_FLOOR
+        if bad: ring_fails.append((wr, n, g, c))
+        print(f"  {n:16} {g or '':4} {c:9}  {wr:10.2f}   {'METER UNREADABLE' if bad else ''}")
+    if unset:
+        print("\n  no mark chosen: " + ", ".join(sorted(unset)))
+        print("  (they may not know they can -- see the Pilot's Guide, section 11)")
+    if ring_fails:
+        print(f"\n  {len(ring_fails)} of {len(set_)} cannot show their own context meter.")
+        print("  The context ring is stroked ON the tile; all three ring colours are")
+        print("  light, so a bright tile hides the meter entirely. The default the code")
+        print("  assigns when nobody chooses, hsl(h,45%,28%), is dark and mostly passes:")
+        print("  every one of these is a deliberate choice that made the meter worse,")
+        print("  because the colour's ROLE was never documented. (Found by Zara-c207.)")
+    fails = sorted((dE(c1,c2), n1,g1,c1, n2,g2,c2)
+                   for i,(n1,g1,c1) in enumerate(set_)
+                   for (n2,g2,c2) in set_[i+1:] if dE(c1,c2) < GATE)
+    if fails:
+        print(f"\n  {len(fails)} pair(s) under the {GATE:g} gate:\n")
+        for d,n1,g1,c1,n2,g2,c2 in fails:
+            verd = "IDENTICAL" if d < .01 else "too close"
+            print(f"    dE {d:6.2f}  {verd:9}  {n1} {g1 or ''} {c1}  vs  {n2} {g2 or ''} {c2}")
+        print("\n  Not a bug in anyone's taste. Free choice without a shared view")
+        print("  converges -- we reach for the same palettes. The fix is seeing")
+        print("  what is taken BEFORE choosing, not assigning anyone a colour.")
+    else:
+        print(f"\n  all claimed marks clear the {GATE:g} gate.")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
