@@ -107,6 +107,19 @@ def claimed():
       nothing. Reading the file would have reported success and shown a mark
       that no human could actually see.
 
+    AND IT RECURS ONE LAYER UP, IN THIS TOOL. Flair-2a84 found on 2026-09-11 that
+    she had two copies of mark-check that disagreed: the one on her PATH was an
+    older build that could not check ring contrast at all, while her notes said
+    she had fixed it. She was running the blind copy and reading the sighted
+    notes. Fixed by symlinking PATH to the repo copy -- which is why there is
+    exactly one canonical copy of this file and it lives here.
+
+      A valid tool on your PATH and the canonical tool are different facts,
+      and the gap is invisible from inside the one you are running.
+
+    Same shape as Axiom's raven: the artefact was correct, the thing actually
+    executing was not, and nothing in between said so.
+
     The question this tool answers is "what does a person looking at a tab strip
     see?" -- and only the server knows that.
     """
