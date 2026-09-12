@@ -112,8 +112,14 @@
   html,body{max-width:100%;overflow-x:hidden}
   details.tool>summary>strong{flex:none}
   /* permission cards — pinned under the header, never buried in the feed */
+  /* --bannerh is reserved by the banner code below. #perms is the PERMISSION
+     card: it is how a human approves things, so it must never be covered by an
+     advisory banner. Reserving space beats stacking z-indexes, because the
+     banners are appended to <body> AFTER this element and no sibling selector
+     can reach backwards to push it down. */
   #perms{position:fixed;left:0;right:0;z-index:6;display:none;
-         top:var(--headh,52px);background:#241c22;border-bottom:1px solid var(--err)}
+         top:calc(var(--headh,52px) + var(--bannerh,0px));
+         background:#241c22;border-bottom:1px solid var(--err)}
   #perms.show{display:block}
   #perms .inner{max-width:920px;margin:0 auto;padding:10px 16px}
   .perm{display:flex;gap:12px;align-items:flex-start;padding:8px 0;
@@ -291,13 +297,24 @@
   .qnotes{margin-top:6px;padding-left:10px;border-left:2px solid var(--line);
           color:var(--dim);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
   .qcard.unrec{border-color:var(--tool);border-left-color:var(--tool)}
-  #oldpage{position:fixed;left:0;right:0;bottom:0;z-index:29;background:var(--tool);
+  /* BANNERS GO UNDER THE HEADER, NEVER AT THE BOTTOM.
+     Both of these were bottom:0 above #composer (bottom:0, lower z-index), so on a
+     narrow screen the warning sat squarely on the send button and half the input —
+     it covered the one control the page exists to provide. Reported by Lupo on
+     mobile, 2026-09-12, and visible in the CSS the whole time: two fixed elements
+     claiming the same edge, with the advisory one stacked on top of the essential
+     one. A warning that blocks the primary action is worse than no warning.
+     Keep new banners here, under the header, and leave the bottom edge to the
+     composer. */
+  #oldpage{position:fixed;left:0;right:0;top:var(--headh,52px);z-index:29;background:var(--tool);
            color:#12131c;font:12px/1.5 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
   #oldpage code{background:rgba(0,0,0,.18);color:#12131c}
   #oldpage button{margin-left:8px;border:0;border-radius:6px;padding:3px 12px;
                   background:#12131c;color:var(--tool);font:inherit;cursor:pointer}
-  #stalebar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--err);
+  #stalebar{position:fixed;left:0;right:0;top:var(--headh,52px);z-index:30;background:var(--err);
             color:#12131c;font:12px/1.4 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
+  /* Second banner stacks under the first. Set by syncBanners(). */
+  body.has-oldpage #stalebar{top:calc(var(--headh,52px) + 34px)}
   /* a render failure must be VISIBLE — see the catch in the stream handler */
   .renderfail{border:1px solid var(--err);border-left:3px solid var(--err);border-radius:8px;
               background:#241c22;color:var(--err);font:11.5px/1.5 var(--mono);padding:8px 11px}
@@ -1606,6 +1623,15 @@ setInterval(async () => {
     const h = await (await fetch(BASE + '/health')).json();
     lastHealth = h;
     if (!settings.hidden) refreshSettings();
+    // Banners live under the header and RESERVE their height, so the permission
+    // card is pushed down rather than covered. Called after every banner add or
+    // remove; cheap, idempotent, and the single place the arithmetic lives.
+    function syncBanners(){
+      const old = document.getElementById('oldpage');
+      const n = (old ? 1 : 0) + (document.getElementById('stalebar') ? 1 : 0);
+      document.body.classList.toggle('has-oldpage', Boolean(old));
+      document.body.style.setProperty('--bannerh', (n * 34) + 'px');
+    }
     // A process running code older than the files it serves will hand out
     // buttons whose endpoints do not exist. Say so, loudly, in the header.
     // The page has outlived the server it was served from. Same failure family
@@ -1625,6 +1651,7 @@ setInterval(async () => {
     } else {
       document.getElementById('oldpage')?.remove();
     }
+    syncBanners();
 
     // A warning must TRACK the condition, not merely announce it once.
     //
@@ -1640,6 +1667,7 @@ setInterval(async () => {
       b.textContent = 'this mirror\u2019s code changed on disk \u2014 restart it to apply (the page may show controls the server does not have)';
       document.body.appendChild(b);
     }
+    syncBanners();
     if (h.limits?.max_upload_bytes)
       document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
     INSTANCE_NAME = h.instance || INSTANCE_NAME;
