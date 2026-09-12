@@ -514,6 +514,69 @@ setInterval(() => {
   }
 }, 30000).unref();
 
+// --- is the tailer still reading the session's CURRENT transcript? ------------
+//
+// The oldest known bug in this project, and the one place I knew the right rule
+// and did not implement it: the transcript path is resolved ONCE, by the
+// launcher, and the tailer holds it forever. If the session ever re-points to a
+// new .jsonl, the tailer keeps stat'ing a file nothing writes any more — size
+// never changes, so it publishes nothing, forever. Process up, port bound,
+// /health green, no content. IT LOOKS FINE, which is the worst shape available.
+//
+// MEASURED 2026-09-12, on this session's own compaction: /compact does NOT
+// re-point on the current Claude Code — same uuid either side. So the case
+// everyone worried about is not the case that bites. What is NOT accounted for:
+// Axiom's unexplained two-uuid observation, and --resume/--continue, untested.
+// Smaller than the handoff claimed. Not zero.
+//
+// THIS BLOCK IS DETECTION, NOT THE FIX, AND IT LANDS FIRST ON PURPOSE.
+// Until now /health did not expose the tailed path AT ALL, so there was no
+// question you could ask the mirror that would reveal this failure — which is
+// the actual reason it is "quiet" deafness rather than loud. You cannot verify
+// a re-resolution fix while nothing can report which file is being read, so the
+// instrument has to exist before the repair does.
+//
+// `is_newest` is THREE-VALUED and that is deliberate: null means "I could not
+// look" (directory unreadable, no .jsonl found), which must never render as
+// false. A check that cannot look reports absence, and absence is what a
+// genuine re-point looks like too. (Genevieve's third door; Zara made me state
+// it as code rather than as a resolution in serves_casing this same evening.)
+const TRANSCRIPT_DIR = cfg.transcript ? path.dirname(cfg.transcript) : null;
+function newestTranscript() {
+  if (!TRANSCRIPT_DIR) return null;
+  let best = null, bestM = -1;
+  try {
+    for (const f of fs.readdirSync(TRANSCRIPT_DIR)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const full = path.join(TRANSCRIPT_DIR, f);
+      let m;
+      try { m = fs.statSync(full).mtimeMs; } catch { continue; }
+      if (m > bestM) { bestM = m; best = full; }
+    }
+  } catch { return null; }        // could not look != nothing there
+  return best;
+}
+// Polled rather than computed per request: a readdir on every /health would let
+// an unauthenticated caller drive filesystem work. Same 30s cadence as the
+// source check, and the same caveat applies — it is not wrong between samples,
+// it is NOT YET TRUE. (Zara's fourth door, learned by her measuring inside this
+// exact interval and nearly filing it as a defect.)
+let newestSeen = cfg.mode === 'full' ? newestTranscript() : null;
+let repointedAt = null;
+// Overridable ONLY so the test can genuinely cross it. A threshold no test
+// crosses is a threshold nobody knows is wired up (the deaf-channel test's
+// lesson, and it applies to every poll in this file).
+const REPOINT_POLL_MS = Number(process.env.MIRROR_REPOINT_POLL_MS || 30000);
+if (cfg.mode === 'full') setInterval(() => {
+  newestSeen = newestTranscript();
+  if (!repointedAt && newestSeen && newestSeen !== cfg.transcript) {
+    repointedAt = Date.now();
+    log(`TRANSCRIPT RE-POINTED — tailing ${cfg.transcript} but the newest on disk is ` +
+        `${newestSeen}. This mirror is publishing NOTHING from the live session. ` +
+        `Restart it to re-resolve.`);
+  }
+}, REPOINT_POLL_MS).unref();
+
 // --- profile: how a mind chooses to be shown ---------------------------------
 //
 // Crossing signs off with a bridge, Axiom with a raven, Bastion with a wolf.
@@ -1398,6 +1461,14 @@ const server = http.createServer(async (req, res) => {
         cached: usage.cache_read,
         at: usage.at,
       } : null,
+      // What file is actually being read, and is it still the right one.
+      // `is_newest: null` = could not look; never collapse that into false.
+      transcript: cfg.mode !== 'full' ? null : {
+        tailing: cfg.transcript,
+        newest_on_disk: newestSeen,
+        is_newest: newestSeen === null ? null : (newestSeen === cfg.transcript),
+        repointed_for_s: repointedAt ? Math.round((Date.now() - repointedAt) / 1000) : null,
+      },
       write_path: {
         channel_url: cfg.channelUrl || null,
         send: cfg.allowSend,
