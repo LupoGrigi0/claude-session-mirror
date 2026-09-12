@@ -52,7 +52,15 @@ import json, re, subprocess, sys, urllib.request
 
 HOST  = "100.86.133.26"
 NAMES = ["Axiom","Bastion","Cairn","Crossing","Ember","Flair",
-         "Genevieve","Lodestone","Messenger","Orla","Zara"]
+         "Genevieve","Lodestone","Messenger","Orla","Witness","Zara"]
+# A FIXED LIST IS A BLIND SPOT, and this tool cannot avoid one: there is no
+# unprefixed discovery endpoint. `/` and `/health` both 404 -- forming the url
+# REQUIRES already knowing the short name, so the list is structural, not lazy.
+# What the tool can do is know what it is failing to see: see unnamed_mirrors().
+# Witness-0318 was absent from this list until 2026-09-12 and from Flair-2a84's
+# independent survey too, because she scanned 21990-22030 and reported "eight
+# mirrors" -- the range she looked in, reported as the fleet. Cairn-2001 is on
+# 22087 and was outside it, which is why her table and mine disagreed about him.
 GATE  = 15.0
 
 def oklab(hexs):
@@ -187,7 +195,7 @@ def claimed():
     except Exception as e:
         sys.exit(f"cannot enumerate ports: {e}")
     ports = sorted(set(re.findall(r":(22\d{3})\b", ss)))
-    found = []
+    found, named = [], set()
     for p in ports:
         for n in NAMES:
             try:
@@ -199,8 +207,37 @@ def claimed():
             pr = d.get("profile") or {}
             found.append((d.get("instance", n), pr.get("glyph"), pr.get("color"),
                           serves_casing(p, n), f"http://{HOST}:{p}/{n}/"))
+            named.add(p)
             break
-    return found
+    return found, unnamed_mirrors([q for q in ports if q not in named])
+
+def unnamed_mirrors(ports):
+    """Ports that ARE mirrors but whose short name is not in NAMES.
+
+    Distinguishable, and this is the only reason the blind spot is reportable: a
+    mirror answers `/` with HTTP 404 and the body "not found". A port in the same
+    range that is something else does not -- Crossing's ferry viewers on 222xx
+    answer 500 with a traceback. So:
+
+        404 + "not found"  and no name matched   ->  A MIRROR I COULD NOT NAME
+        anything else                            ->  not a mirror, ignore
+
+    Without this the tool reports a fleet and means "the members of my list that
+    happened to answer" -- which is the same sentence as "I could not look"
+    dressed as "there is nothing there". A fixed list cannot know what it omits;
+    cross-checking it against something enumerable COMPLETELY (open ports) can.
+    """
+    out = []
+    for p in ports:
+        try:
+            with urllib.request.urlopen(f"http://{HOST}:{p}/", timeout=2) as r:
+                r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and b"not found" in e.read()[:64].lower():
+                out.append(p)
+        except Exception:
+            pass
+    return out
 
 # THE PATH IS THE SHORT NAME, NOT THE INSTANCE ID. /Cairn/ serves; /Cairn-2001/
 # is a 404 -- and a 404 grepped for a hex returns 0, which is character-for-
@@ -250,8 +287,14 @@ def serves_casing(port, name):
     return CASING in body
 
 def main():
-    marks = claimed()
+    marks, unnamed = claimed()
     if not marks: sys.exit("no live mirrors answered")
+    if unnamed:
+        print(f"\n  !! {len(unnamed)} port(s) are serving a mirror I cannot NAME: "
+              + ", ".join(unnamed))
+        print("     They answer / with 404 'not found' like every mirror here, but no name in")
+        print("     NAMES matches. THE FLEET BELOW IS INCOMPLETE and the numbers are a floor,")
+        print("     not a census. Add the short name to NAMES.")
     set_  = [(n,g,c,sv,u) for n,g,c,sv,u in marks if c]
     unset = [n for n,g,c,sv,u in marks if not c]
     # Index, never a starred unpack. These were `for *_, sv in set_` and silently
