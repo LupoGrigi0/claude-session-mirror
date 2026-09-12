@@ -88,10 +88,69 @@ def contrast(a, b):
     hi, lo = max(la, lb), min(la, lb)
     return (hi + .05) / (lo + .05)
 
-def ring_report(tile):
-    """(worst_ratio, [(level, ratio), ...]) for a tile against all three ring states."""
-    rs = [(k, contrast(tile, v)) for k, v in RINGS.items()]
-    return min(r for _, r in rs), rs
+CASING = "#11121a"      # the dark casing stroked UNDER the ring: 8px beneath a 5px
+                        # ring, so 1.5px shows each side. Cairn-2001, 2026-09-09.
+
+def ring_report(tile, cased=True):
+    """(worst, rows, casing_vs_tile); rows = [(level, ring_vs_tile, meter), ...]
+
+    `meter` is what actually governs a glance at a tab strip:
+
+        cased      max(ring_vs_tile, casing_vs_tile)
+        uncased    ring_vs_tile alone
+
+    ---------------------------------------------------------------------------
+    WHY max() AND NOT THE RING ALONE. READ THIS BEFORE "SIMPLIFYING" IT BACK.
+    ---------------------------------------------------------------------------
+    The meter is a dark 8px casing with a light 5px ring centred in it. Its outer
+    boundary against the tile is made by WHICHEVER of the two differs from the
+    tile, and the two fail in complementary directions: beating the ring needs a
+    light tile, beating the casing needs a dark one, and no tile is both. That is
+    why the fix is a proof rather than a threshold, and why nobody had to move.
+
+    The ring-only gate that this replaces was not merely out of date. It was
+    ACTIVELY STEERING THE FLEET INTO A COLLISION, and the steering was invisible
+    because each person only ever ran it against their own candidate.
+
+    Measured by Cairn-2001, 2026-09-12, while looking for a replacement for a
+    tile he shares with Orla at dE 0.00:
+
+        every dark colour that satisfied the ring-only gate collided with Zara
+            #3d4a42 ring 3.52 -> dE 13.15    #44403c ring 3.88 -> dE 12.56
+            #2d4a3e ring 3.67 -> dE 12.79    #3f3a34 ring 4.25 -> dE 12.30
+            #2f3e46 ring 4.18 -> dE  9.10
+        six well-separated mid-tones (dE 17-21 from the whole fleet)
+            all six FAILED ring-only (1.27-1.79) and all six pass under max()
+
+    All three ring colours are light, so ring-only demands a DARK tile. OKLab
+    compresses at low lightness, so the dark region is SMALL and already occupied.
+    The two gates were therefore in structural tension: as each failing person
+    "fixed" their ring contrast they would have gone dark, collided with each
+    other and with the two who already passed -- and it would have read, again,
+    as several people making bad choices independently.
+
+        A gate that can only be satisfied inside a small region MANUFACTURES the
+        crowding that the other gate exists to detect.
+
+    So: do not restore the ring-only gate to "keep the tool strict". Strictness
+    here was not conservative; it had a direction, and the direction was wrong.
+    (Pilot's Guide s2: when you defuse something, write down that you defused it
+    in the place where someone would later go to delete the guard.)
+    """
+    ct = contrast(tile, CASING)
+    rows = []
+    for k, v in RINGS.items():
+        rv = contrast(tile, v)
+        rows.append((k, rv, max(rv, ct) if cased else rv))
+    return min(m for _, _, m in rows), rows, ct
+
+def internal_check():
+    """The third leg: the ring must also read against its own casing, or a dark
+    tile gives dark-on-dark with no edge. Fixed by the two colour sets, so it is
+    an ASSERTION about the palette rather than a per-tile check -- and it is here
+    so that changing a ring colour cannot silently remove the guarantee max()
+    depends on. (The leg the original tabulation missed; caught by Cairn-2001.)"""
+    return [(k, contrast(v, CASING)) for k, v in RINGS.items()]
 
 def claimed():
     """Ask each live mirror what it SERVES. The server is the oracle, never the file.
@@ -138,31 +197,74 @@ def claimed():
                 continue
             if not d.get("ok"): continue
             pr = d.get("profile") or {}
-            found.append((d.get("instance", n), pr.get("glyph"), pr.get("color")))
+            found.append((d.get("instance", n), pr.get("glyph"), pr.get("color"),
+                          serves_casing(p, n)))
             break
     return found
+
+def serves_casing(port, name):
+    """True / False / None -- does THIS mirror actually serve the cased ring?
+
+    Returns None for "I could not look", which is NOT the same as False and must
+    never be rendered as one.
+
+    This is a second axis, not a column. The casing is in web/index.html, which
+    the server re-reads per request, so it arrives with a plain `git pull` and
+    NOTHING about a valid profile or a healthy /health reflects whether it has.
+    On 2026-09-12 the casing had been merged for three days and was deployed on
+    ONE mirror of eight (Flair-2a84, measuring every live port). The same hex was
+    safe on that one and unsafe on the other seven -- so deployment SELECTS WHICH
+    RULER APPLIES, and scoring everyone with one ruler is wrong in both
+    directions at once.
+
+    THE CONTROL is the point of the function. A response that simply failed to
+    arrive, or arrived truncated, would report "casing absent" just as loudly as
+    a genuinely uncased mirror. So we first confirm we can see the favicon
+    builder at all -- all three ring hexes -- and only then is the absence of the
+    casing hex evidence of anything. Without that this is "I could not look"
+    reported as "there is nothing there" (Pilot's Guide s2, and the discipline is
+    Flair-2a84's: her fleet measurement carried this control and that is what
+    made it a measurement).
+    """
+    try:
+        with urllib.request.urlopen(f"http://{HOST}:{port}/{name}/", timeout=3) as r:
+            body = r.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    if sum(body.count(v) for v in RINGS.values()) < len(RINGS):
+        return None                      # could not see the favicon code: UNKNOWN
+    return CASING in body
 
 def main():
     marks = claimed()
     if not marks: sys.exit("no live mirrors answered")
-    set_  = [(n,g,c) for n,g,c in marks if c]
-    unset = [n for n,g,c in marks if not c]
+    set_  = [(n,g,c,sv) for n,g,c,sv in marks if c]
+    unset = [n for n,g,c,sv in marks if not c]
+    cased_n   = sum(1 for *_, sv in set_ if sv is True)
+    unknown_n = sum(1 for *_, sv in set_ if sv is None)
 
     if len(sys.argv) > 1:
         cand = sys.argv[1]
         try: oklab(cand)
         except ValueError as e: sys.exit(f"bad colour: {e}")
         print(f"\ncandidate {cand}\n")
-        worst_ring, rs = ring_report(cand)
-        print(f"  1. METER READABILITY  (WCAG contrast, tile vs context ring; floor {RING_FLOOR:g})")
-        for level, r in rs:
-            print(f"       {level:14} {r:6.2f}   {'ok' if r >= RING_FLOOR else 'UNREADABLE'}")
-        print(f"     worst {worst_ring:.2f} -> {'clear by %.2f' % (worst_ring-RING_FLOOR) if worst_ring>=RING_FLOOR else 'SHORT BY %.2f' % (RING_FLOOR-worst_ring)}")
-        print(f"     A dark tile is what makes the ring read; all three ring colours are light.")
+        worst_ring, rows, ct = ring_report(cand)
+        worst_bare = min(r for _, r, _ in rows)
+        print(f"  1. METER READABILITY  (WCAG non-text contrast; floor {RING_FLOOR:g})")
+        print(f"     casing {CASING} vs this tile: {ct:.2f}")
+        print(f"       {'':14} {'ring':>6} {'meter':>7}")
+        for level, rv, m in rows:
+            print(f"       {level:14} {rv:6.2f} {m:7.2f}   {'ok' if m >= RING_FLOOR else 'UNREADABLE'}")
+        print(f"     worst meter {worst_ring:.2f} -> "
+              f"{'clear by %.2f' % (worst_ring-RING_FLOOR) if worst_ring>=RING_FLOOR else 'SHORT BY %.2f' % (RING_FLOOR-worst_ring)}")
+        if worst_bare < RING_FLOOR <= worst_ring:
+            print(f"     NOTE: bare ring is only {worst_bare:.2f} -- this colour reads BECAUSE OF")
+            print(f"     the casing. On a mirror that has not pulled it yet your meter is still")
+            print(f"     absent. Confirm with:  curl -s <your-port>/<You>/ | grep -c '{CASING}'")
         print()
         print(f"  2. PEER SEPARATION  (OKLab dE x100; floor {GATE:g})  vs {len(set_)} claimed mark(s)")
-        worst = min(((dE(cand,c), n, g, c) for n,g,c in set_), default=None)
-        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c in set_):
+        worst = min(((dE(cand,c), n, g, c) for n,g,c,_ in set_), default=None)
+        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c,_ in set_):
             verd = "IDENTICAL" if d < .01 else ("TOO CLOSE" if d < GATE else "ok")
             print(f"       dE {d:6.2f}  {verd:10}  {n} {g or ''} {c}")
         if worst:
@@ -177,33 +279,67 @@ def main():
         if not ring_ok:
             print("  -> THE METER WOULD BE UNREADABLE. This is the one that matters:")
             print("     your context gauge is the reason the tab has a badge at all.")
+            print("     Going DARKER is the obvious fix and is the one to distrust: the")
+            print("     dark region is small and already crowded, so it trades this gate")
+            print("     for the next one. Mid-tones pass on the casing -- see ring_report.")
         if not peer_ok:
             print("  -> hard to tell from a sibling's tab. Shifting hue buys more than lightness.")
         print("     Your mark is yours; these are numbers, not a ruling.")
         return 1
 
-    print(f"\n{len(set_)} mark(s) claimed, {len(unset)} unset")
-    print(f"rulers: WCAG contrast (ring, floor {RING_FLOOR:g}) | OKLab dE x100 (peers, floor {GATE:g})\n")
-    print(f"  {'instance':16} {'':4} {'tile':9}  {'ring worst':>10}")
-    ring_fails = []
-    for n,g,c in sorted(set_):
-        wr, _ = ring_report(c)
-        bad = wr < RING_FLOOR
-        if bad: ring_fails.append((wr, n, g, c))
-        print(f"  {n:16} {g or '':4} {c:9}  {wr:10.2f}   {'METER UNREADABLE' if bad else ''}")
+    print(f"\n{len(set_)} mark(s) claimed, {len(unset)} unset "
+          f"| casing deployed on {cased_n}/{len(set_)}"
+          + (f", {unknown_n} UNKNOWN" if unknown_n else ""))
+    print(f"rulers: WCAG non-text contrast (floor {RING_FLOOR:g}) | OKLab dE x100 (peers, floor {GATE:g})")
+    print("the SERVED column selects which ruler applies -- uncased mirrors are scored on the")
+    print("bare ring, because that is what their viewers actually see.\n")
+    print(f"  {'instance':16} {'':4} {'tile':9} {'ring':>6} {'casing':>7} {'meter':>7}  {'served':6}")
+    ring_fails, latent = [], []
+    for n,g,c,sv in sorted(set_):
+        cased = (sv is not False)                 # UNKNOWN scored optimistically, flagged loudly
+        wr, rows, ct = ring_report(c, cased=cased)
+        bare = min(r for _, r, _ in rows)
+        bad  = wr < RING_FLOOR
+        if bad: ring_fails.append((wr, n, g, c, sv))
+        elif bare < RING_FLOOR and sv is not True: latent.append((n, sv))
+        tag = {True: "yes", False: "NO", None: "?"}[sv]
+        print(f"  {n:16} {g or '':4} {c:9} {bare:6.2f} {ct:7.2f} {wr:7.2f}  {tag:6} "
+              f"{'METER UNREADABLE' if bad else ''}")
+    ic = internal_check()
+    if any(r < RING_FLOOR for _, r in ic):
+        print(f"\n  !! ring-vs-casing has fallen below {RING_FLOOR:g}: "
+              + ", ".join(f"{k} {r:.2f}" for k, r in ic))
+        print("     max() assumes the ring reads against its own casing. It no longer does.")
     if unset:
         print("\n  no mark chosen: " + ", ".join(sorted(unset)))
         print("  (they may not know they can -- see the Pilot's Guide, section 11)")
     if ring_fails:
+        undeployed = [n for _, n, _, _, sv in ring_fails if sv is False]
         print(f"\n  {len(ring_fails)} of {len(set_)} cannot show their own context meter.")
-        print("  The context ring is stroked ON the tile; all three ring colours are")
-        print("  light, so a bright tile hides the meter entirely. The default the code")
-        print("  assigns when nobody chooses, hsl(h,45%,28%), is dark and mostly passes:")
-        print("  every one of these is a deliberate choice that made the meter worse,")
-        print("  because the colour's ROLE was never documented. (Found by Zara-c207.)")
+        if undeployed:
+            print(f"  {len(undeployed)} of them ({', '.join(sorted(undeployed))}) would pass ALREADY")
+            print("  if their mirror served the casing. This is NOT a colour problem for them")
+            print("  and asking them to change their mark would be the wrong repair:")
+            print()
+            print("      cd ~/claude-session-mirror && git pull --ff-only origin master")
+            print()
+            print("  No restart -- web/index.html is re-read per request. Do NOT gate that on")
+            print("  `git log HEAD..origin/master`: it compares against the LOCAL cached ref and")
+            print("  returns empty on a repo that has never fetched, which is how it reads as")
+            print("  'you are current' to the one person careful enough to check. Use")
+            print("  `git fetch origin master && git log --oneline HEAD..FETCH_HEAD -- web/`.")
+        print("  Where it IS the colour: all three ring colours are light, so a bright tile")
+        print("  hides the bare ring. The default the code assigns when nobody chooses,")
+        print("  hsl(h,45%,28%), is dark and mostly passes -- every deliberate choice made the")
+        print("  meter worse, because the colour's ROLE was never documented. (Zara-c207.)")
+    if latent:
+        print(f"\n  {len(latent)} mark(s) pass only BECAUSE of the casing, on a mirror not")
+        print("  confirmed to serve it: " + ", ".join(f"{n} ({'unknown' if sv is None else 'not served'})"
+                                                      for n, sv in sorted(latent)))
+        print("  Scored as passing. Verify before trusting it.")
     fails = sorted((dE(c1,c2), n1,g1,c1, n2,g2,c2)
-                   for i,(n1,g1,c1) in enumerate(set_)
-                   for (n2,g2,c2) in set_[i+1:] if dE(c1,c2) < GATE)
+                   for i,(n1,g1,c1,_) in enumerate(set_)
+                   for (n2,g2,c2,_) in set_[i+1:] if dE(c1,c2) < GATE)
     if fails:
         print(f"\n  {len(fails)} pair(s) under the {GATE:g} gate:\n")
         for d,n1,g1,c1,n2,g2,c2 in fails:
