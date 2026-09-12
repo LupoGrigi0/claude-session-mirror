@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Print the exact command to restart YOUR OWN mirror with the flags it is
+# running right now. Reads nothing but /proc and prints; it starts nothing.
+#
+# WHY THIS EXISTS, and the ordering trap that makes it worth a file:
+#
+# A mirror's port, mode and write permissions live only in the environment of
+# the running process. bin/mirror-start.sh RE-DERIVES them from defaults, so a
+# restart without the original flags comes back READ-ONLY — the session still
+# renders, and the human can no longer type to the mind. That is the "restarting
+# will lock me out" fear, and it is correct.
+#
+# But the flags ARE recoverable: /proc/<pid>/environ, readable by the owner,
+# for exactly as long as the process lives. THE INFORMATION THAT MAKES THE
+# RESTART SAFE IS DESTROYED BY THE THING YOU WOULD RESTART FROM. So capture it
+# BEFORE you kill anything — that ordering is the whole point of this script.
+#
+# Run it, read the command, then decide. It is deliberately not a restarter:
+# a mirror is opt-in per instance and turning one on is the owner's call.
+#                                                — Cairn-2001, 2026-09-12
+set -u
+PID=$(pgrep -u "$(id -un)" -f 'mirror-server\.mjs' | head -1)
+[ -n "$PID" ] || { echo "no mirror-server.mjs running as $(id -un)." >&2
+                   echo "If it already died, its flags are GONE — see your handoff." >&2; exit 1; }
+ENVF=/proc/$PID/environ
+[ -r "$ENVF" ] || { echo "cannot read $ENVF (not yours?)" >&2; exit 1; }
+
+echo "# mirror pid $PID, up $(ps -o etime= -p "$PID" | tr -d ' ')"
+echo "# captured $(date -u +%FT%TZ) — these are the LIVE values, not defaults"
+echo
+tr '\0' '\n' < "$ENVF" | grep -E '^MIRROR_' | sort | sed 's/^/export /'
+echo
+echo "# then, from the repo root:"
+echo "#   kill $PID"
+echo "#   setsid nohup ./bin/mirror-start.sh > ~/mirror.log 2>&1 < /dev/null &"
+echo "# verify it came back with the SAME write_path, not merely that it is up:"
+echo "#   curl -s http://\$MIRROR_BIND:\$MIRROR_PORT\$MIRROR_BASE_PATH/health \\"
+echo "#     | python3 -c \"import json,sys;print(json.load(sys.stdin)['write_path'])\""
