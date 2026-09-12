@@ -198,9 +198,23 @@ def claimed():
             if not d.get("ok"): continue
             pr = d.get("profile") or {}
             found.append((d.get("instance", n), pr.get("glyph"), pr.get("color"),
-                          serves_casing(p, n)))
+                          serves_casing(p, n), f"http://{HOST}:{p}/{n}/"))
             break
     return found
+
+# THE PATH IS THE SHORT NAME, NOT THE INSTANCE ID. /Cairn/ serves; /Cairn-2001/
+# is a 404 -- and a 404 grepped for a hex returns 0, which is character-for-
+# character what "the casing is absent" returns. Cairn-2001 was handed
+# `curl .../Cairn-2001/ | grep -c` as a verification step on 2026-09-12 and would
+# have concluded his own mirror was uncased and rejected a colour over it.
+#
+# This tool was never exposed: serves_casing() discovers the path by asking, and
+# its control catches the 404. THE HAND-WRITTEN SHORTCUT IN THE ADVICE BESIDE IT
+# HAD NO CONTROL. Same author, same hour: the discipline was in the code and
+# absent from the prose.
+#
+# So the tool emits the REAL url per instance and nobody retypes a template.
+# An instruction containing a blank to fill in is a place for this to happen again.
 
 def serves_casing(port, name):
     """True / False / None -- does THIS mirror actually serve the cased ring?
@@ -238,10 +252,15 @@ def serves_casing(port, name):
 def main():
     marks = claimed()
     if not marks: sys.exit("no live mirrors answered")
-    set_  = [(n,g,c,sv) for n,g,c,sv in marks if c]
-    unset = [n for n,g,c,sv in marks if not c]
-    cased_n   = sum(1 for *_, sv in set_ if sv is True)
-    unknown_n = sum(1 for *_, sv in set_ if sv is None)
+    set_  = [(n,g,c,sv,u) for n,g,c,sv,u in marks if c]
+    unset = [n for n,g,c,sv,u in marks if not c]
+    # Index, never a starred unpack. These were `for *_, sv in set_` and silently
+    # bound the URL when the tuple grew a field -- reporting 0/7 cased while the
+    # table below printed "yes". Caught only because the two disagreed: a summary
+    # and a detail derived separately are the two witnesses, and their
+    # disagreement IS the detector (Pilot's Guide s7).
+    cased_n   = sum(1 for t in set_ if t[3] is True)
+    unknown_n = sum(1 for t in set_ if t[3] is None)
 
     if len(sys.argv) > 1:
         cand = sys.argv[1]
@@ -263,8 +282,8 @@ def main():
             print(f"     absent. Confirm with:  curl -s <your-port>/<You>/ | grep -c '{CASING}'")
         print()
         print(f"  2. PEER SEPARATION  (OKLab dE x100; floor {GATE:g})  vs {len(set_)} claimed mark(s)")
-        worst = min(((dE(cand,c), n, g, c) for n,g,c,_ in set_), default=None)
-        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c,_ in set_):
+        worst = min(((dE(cand,c), n, g, c) for n,g,c,*_ in set_), default=None)
+        for d,n,g,c in sorted((dE(cand,c), n, g, c) for n,g,c,*_ in set_):
             verd = "IDENTICAL" if d < .01 else ("TOO CLOSE" if d < GATE else "ok")
             print(f"       dE {d:6.2f}  {verd:10}  {n} {g or ''} {c}")
         if worst:
@@ -295,12 +314,12 @@ def main():
     print("bare ring, because that is what their viewers actually see.\n")
     print(f"  {'instance':16} {'':4} {'tile':9} {'ring':>6} {'casing':>7} {'meter':>7}  {'served':6}")
     ring_fails, latent = [], []
-    for n,g,c,sv in sorted(set_):
+    for n,g,c,sv,url in sorted(set_):
         cased = (sv is not False)                 # UNKNOWN scored optimistically, flagged loudly
         wr, rows, ct = ring_report(c, cased=cased)
         bare = min(r for _, r, _ in rows)
         bad  = wr < RING_FLOOR
-        if bad: ring_fails.append((wr, n, g, c, sv))
+        if bad: ring_fails.append((wr, n, g, c, sv, url))
         elif bare < RING_FLOOR and sv is not True: latent.append((n, sv))
         tag = {True: "yes", False: "NO", None: "?"}[sv]
         print(f"  {n:16} {g or '':4} {c:9} {bare:6.2f} {ct:7.2f} {wr:7.2f}  {tag:6} "
@@ -314,14 +333,20 @@ def main():
         print("\n  no mark chosen: " + ", ".join(sorted(unset)))
         print("  (they may not know they can -- see the Pilot's Guide, section 11)")
     if ring_fails:
-        undeployed = [n for _, n, _, _, sv in ring_fails if sv is False]
+        undeployed = [(n,u) for _, n, _, _, sv, u in ring_fails if sv is False]
         print(f"\n  {len(ring_fails)} of {len(set_)} cannot show their own context meter.")
         if undeployed:
-            print(f"  {len(undeployed)} of them ({', '.join(sorted(undeployed))}) would pass ALREADY")
+            print(f"  {len(undeployed)} of them ({', '.join(sorted(n for n,_ in undeployed))}) would pass ALREADY")
             print("  if their mirror served the casing. This is NOT a colour problem for them")
             print("  and asking them to change their mark would be the wrong repair:")
             print()
             print("      cd ~/claude-session-mirror && git pull --ff-only origin master")
+            print()
+            print("  Then re-run this tool to confirm. Do NOT hand-write a curl to check: the")
+            print("  path is the SHORT NAME, not the instance id, and a 404 greps to 0 exactly")
+            print("  as an absent casing does. The real urls, so nobody retypes a template:")
+            for n,u in sorted(undeployed):
+                print(f"      {n:16} {u}")
             print()
             print("  No restart -- web/index.html is re-read per request. Do NOT gate that on")
             print("  `git log HEAD..origin/master`: it compares against the LOCAL cached ref and")
@@ -338,8 +363,8 @@ def main():
                                                       for n, sv in sorted(latent)))
         print("  Scored as passing. Verify before trusting it.")
     fails = sorted((dE(c1,c2), n1,g1,c1, n2,g2,c2)
-                   for i,(n1,g1,c1,_) in enumerate(set_)
-                   for (n2,g2,c2,_) in set_[i+1:] if dE(c1,c2) < GATE)
+                   for i,(n1,g1,c1,*_) in enumerate(set_)
+                   for (n2,g2,c2,*_) in set_[i+1:] if dE(c1,c2) < GATE)
     if fails:
         print(f"\n  {len(fails)} pair(s) under the {GATE:g} gate:\n")
         for d,n1,g1,c1,n2,g2,c2 in fails:
