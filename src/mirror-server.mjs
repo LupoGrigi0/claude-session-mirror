@@ -1477,6 +1477,20 @@ const server = http.createServer(async (req, res) => {
         upload: cfg.allowUpload,
         // Loud on purpose: "STUB" here means identity is assumed, not proven.
         identity_source: (resolveIdentity(req) || { source: 'none' }).source,
+        // ...and WHO it assumed you are. Added 2026-09-13 after restarting my own
+        // mirror with MIRROR_STUB_IDENTITY silently lost to shell quoting (the
+        // value is `lupo|Lupo` — the pipe is a shell metacharacter, so sourcing a
+        // captured environment ate it). stubIdentity() falls back to 'user|User'
+        // when the var is empty, so /health went on reporting `STUB` and was
+        // TECHNICALLY CORRECT: the mechanism really was the stub. It just was not
+        // the PERSON any more, and the name in the UI had quietly changed.
+        //
+        // Reporting which MECHANISM is in use is not the same as reporting whether
+        // it CARRIED THE VALUE it was configured with — the same shape as a version
+        // endpoint that reports the server's commit while serving someone else's
+        // client code. The name is cheap; print it, and the substitution stops
+        // being invisible.
+        identity_display: (resolveIdentity(req) || {}).display || null,
         may_write: mayWrite(resolveIdentity(req)),
         // DERIVED, never asserted. The channel's own /health cannot report this
         // — it answers ok:true from a literal and has no way to know whether the
