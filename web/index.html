@@ -1125,7 +1125,22 @@ function queueSend(){
   // A leading slash addresses the CHASSIS, not the mind. Lupo asked for this as
   // a free-text box rather than a maintained menu, so there is no list to keep
   // in sync — the server owns the allowlist and says what it refused.
-  if (/^\/[a-zA-Z]/.test(text)){ runCommand(text); return; }
+  //
+  // BUT IT MUST ACTUALLY LOOK LIKE A COMMAND. 2026-09-13: Lupo wrote a long
+  // multi-paragraph message that happened to begin with the word "/login". The
+  // old test was `^\/[a-zA-Z]` — first two characters — so the whole paragraph
+  // was parsed as a command with the rest as arguments, refused by the
+  // allowlist, and bounced back into the box. He lost several minutes, and the
+  // status line was telling him the truth in words he had no reason to connect
+  // to the first token of his own paragraph. He assumed the mirror had gone
+  // deaf, which is the same conclusion the deaf-channel work exists to prevent.
+  //
+  // A real slash command is ONE LINE and SHORT. Anything multi-line, or with a
+  // long tail, is prose that happens to start with a slash. Bias toward
+  // treating it as a message: sending prose as a message is harmless, while
+  // swallowing prose into a command is what just cost him the time.
+  const looksLikeCommand = /^\/[a-zA-Z][\w:-]*(?:[ \t]+\S[^\n]{0,120})?$/.test(text);
+  if (looksLikeCommand){ runCommand(text); return; }
   // A second Send while one is queued means "and also this" — flush the first
   // immediately so the session receives them in the order they were written.
   if (pending) flushPending();
@@ -1174,7 +1189,11 @@ async function runCommand(raw){
       setTimeout(()=>{ if(!pending) sendStat.textContent=''; }, 3000);
     } else if (d.allowed){
       input.value = raw; resize(); refresh();
-      sendStat.textContent = `/${name} not allowed \u2014 try: ${d.allowed.map(c=>'/'+c).join(' ')}`;
+      // Say what to DO, not merely what was refused. Your text is still in the
+      // box; the fix is usually "that was prose, not a command".
+      sendStat.textContent = `/${name} is not a mirror command \u2014 your text is still here. `
+        + `Remove the leading "/" to send it as a message. Allowed: `
+        + d.allowed.map(c=>'/'+c).join(' ');
     } else {
       input.value = raw; resize(); refresh();
       sendStat.textContent = `/${name} failed: ${d.error || r.status}`;
