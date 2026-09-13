@@ -112,14 +112,11 @@
   html,body{max-width:100%;overflow-x:hidden}
   details.tool>summary>strong{flex:none}
   /* permission cards — pinned under the header, never buried in the feed */
-  /* --bannerh is reserved by the banner code below. #perms is the PERMISSION
-     card: it is how a human approves things, so it must never be covered by an
-     advisory banner. Reserving space beats stacking z-indexes, because the
-     banners are appended to <body> AFTER this element and no sibling selector
-     can reach backwards to push it down. */
+  /* No banner may cover this. It is the PERMISSION card — how a human approves
+     things — which is why staleness moved onto the gear icon instead of into a
+     full-width bar that has to be stacked around. Nothing overlays it now. */
   #perms{position:fixed;left:0;right:0;z-index:6;display:none;
-         top:calc(var(--headh,52px) + var(--bannerh,0px));
-         background:#241c22;border-bottom:1px solid var(--err)}
+         top:var(--headh,52px);background:#241c22;border-bottom:1px solid var(--err)}
   #perms.show{display:block}
   #perms .inner{max-width:920px;margin:0 auto;padding:10px 16px}
   .perm{display:flex;gap:12px;align-items:flex-start;padding:8px 0;
@@ -195,6 +192,30 @@
   #gear{background:none;border:0;color:var(--faint);font-size:16px;cursor:pointer;
         padding:2px 4px;line-height:1;flex:none}
   #gear:hover,#gear[aria-expanded="true"]{color:var(--cairn)}
+  /* STALENESS LIVES ON THE GEAR, NOT IN A FULL-WIDTH BANNER.
+     Lupo, 2026-09-13, looking at three windows with red bars across the bottom:
+     on a development team this state is COMMON, so a banner that shouts is
+     wallpaper by the third window and was covering his input box on mobile.
+     A tinted gear is visible without being in the way, and the explanation
+     lives where someone goes to act on it. Red = the SERVER is behind its
+     files (needs a restart, see the Pilot's Guide 11-A). Pink = the PAGE is
+     behind the server (just reload). Different colours because they are
+     different actions taken by different people. */
+  #gear.stale-src{color:var(--err)}
+  #gear.stale-page{color:#e8a0c8}
+  #gear.stale-src.stale-page{color:var(--err)}   /* server first: it is the bigger one */
+  #gear.stale-src,#gear.stale-page{animation:gearpulse 2.4s ease-in-out 3}
+  @keyframes gearpulse{0%,100%{opacity:1}50%{opacity:.45}}
+  #stalenote{display:none;margin:0 0 2px;padding:10px 12px;border-radius:8px;
+             font:11.5px/1.55 var(--mono)}
+  #stalenote.src{display:block;background:rgba(247,118,142,.12);
+                 border:1px solid var(--err);color:var(--err)}
+  #stalenote.page{display:block;background:rgba(232,160,200,.12);
+                  border:1px solid #e8a0c8;color:#e8a0c8}
+  #stalenote b{display:block;margin-bottom:3px;font-size:12px}
+  #stalenote code{background:rgba(0,0,0,.25);padding:1px 4px;border-radius:3px}
+  #stalenote button{margin-top:7px;border:0;border-radius:6px;padding:4px 12px;
+                    background:currentColor;color:var(--bg);font:inherit;cursor:pointer}
   #settings{position:fixed;z-index:8;right:12px;top:var(--headh,52px);width:min(360px,calc(100vw - 24px));
             max-height:min(70vh,560px);overflow:auto;background:var(--panel);
             border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;
@@ -297,24 +318,6 @@
   .qnotes{margin-top:6px;padding-left:10px;border-left:2px solid var(--line);
           color:var(--dim);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
   .qcard.unrec{border-color:var(--tool);border-left-color:var(--tool)}
-  /* BANNERS GO UNDER THE HEADER, NEVER AT THE BOTTOM.
-     Both of these were bottom:0 above #composer (bottom:0, lower z-index), so on a
-     narrow screen the warning sat squarely on the send button and half the input —
-     it covered the one control the page exists to provide. Reported by Lupo on
-     mobile, 2026-09-12, and visible in the CSS the whole time: two fixed elements
-     claiming the same edge, with the advisory one stacked on top of the essential
-     one. A warning that blocks the primary action is worse than no warning.
-     Keep new banners here, under the header, and leave the bottom edge to the
-     composer. */
-  #oldpage{position:fixed;left:0;right:0;top:var(--headh,52px);z-index:29;background:var(--tool);
-           color:#12131c;font:12px/1.5 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
-  #oldpage code{background:rgba(0,0,0,.18);color:#12131c}
-  #oldpage button{margin-left:8px;border:0;border-radius:6px;padding:3px 12px;
-                  background:#12131c;color:var(--tool);font:inherit;cursor:pointer}
-  #stalebar{position:fixed;left:0;right:0;top:var(--headh,52px);z-index:30;background:var(--err);
-            color:#12131c;font:12px/1.4 var(--mono);padding:8px 14px;text-align:center;font-weight:700}
-  /* Second banner stacks under the first. Set by syncBanners(). */
-  body.has-oldpage #stalebar{top:calc(var(--headh,52px) + 34px)}
   /* a render failure must be VISIBLE — see the catch in the stream handler */
   .renderfail{border:1px solid var(--err);border-left:3px solid var(--err);border-radius:8px;
               background:#241c22;color:var(--err);font:11.5px/1.5 var(--mono);padding:8px 11px}
@@ -339,6 +342,7 @@
   <button id="gear" title="Settings" aria-expanded="false">⚙</button>
 </header>
 <div id="settings" hidden>
+  <div id="stalenote"></div>
   <div class="sect">
     <div class="lbl">Enter key</div>
     <button id="entertoggle"></button>
@@ -928,6 +932,10 @@ enterBtn.addEventListener('click', () => {
 applyEnterMode();
 
 // --- settings panel ----------------------------------------------------------
+// Two INDEPENDENT staleness facts, deliberately not merged into one flag:
+// .src  = the server is behind its files (someone must restart it)
+// .page = this tab is behind the server (the viewer can just reload)
+const STALE = { src: false, page: null };
 const gear = document.getElementById('gear');
 const settings = document.getElementById('settings');
 const setInfo = document.getElementById('setinfo');
@@ -1623,14 +1631,43 @@ setInterval(async () => {
     const h = await (await fetch(BASE + '/health')).json();
     lastHealth = h;
     if (!settings.hidden) refreshSettings();
-    // Banners live under the header and RESERVE their height, so the permission
-    // card is pushed down rather than covered. Called after every banner add or
-    // remove; cheap, idempotent, and the single place the arithmetic lives.
-    function syncBanners(){
-      const old = document.getElementById('oldpage');
-      const n = (old ? 1 : 0) + (document.getElementById('stalebar') ? 1 : 0);
-      document.body.classList.toggle('has-oldpage', Boolean(old));
-      document.body.style.setProperty('--bannerh', (n * 34) + 'px');
+    // Staleness is shown by TINTING THE GEAR and explaining inside the panel,
+    // never by a banner across the viewport. Two independent conditions:
+    //   src  — the SERVER is behind its files. Needs a restart, and a restart
+    //          is dangerous if the recorded flags are wrong: Pilot's Guide 11-A.
+    //   page — THIS TAB is behind the server. Just reload; costs nothing.
+    // Different people act on them, so they are never merged into one message.
+    function syncStale(){
+      const g = document.getElementById('gear');
+      if (!g) return;
+      g.classList.toggle('stale-src',  Boolean(STALE.src));
+      g.classList.toggle('stale-page', Boolean(STALE.page));
+      g.title = STALE.src  ? 'Settings \u2014 this mirror needs a restart'
+              : STALE.page ? 'Settings \u2014 reload to get the newest page'
+              : 'Settings';
+      const n = document.getElementById('stalenote');
+      if (!n) return;
+      if (STALE.src){
+        n.className = 'src';
+        n.innerHTML = '<b>This mirror needs a restart</b>'
+          + 'The code on disk is newer than the code this server is running. '
+          + 'Nothing is broken and nothing is lost \u2014 it is reporting its own '
+          + 'stale state honestly.<br><br>'
+          + '<b style="font-size:11.5px">Do not just restart it.</b>'
+          + 'A restart rebuilds from <code>~/.mirror-env</code> and silently drops any '
+          + 'capability not written there. Follow <b style="display:inline">Pilot\u2019s Guide '
+          + '\u00a711-A</b>, which checks that first.';
+      } else if (STALE.page){
+        n.className = 'page';
+        n.innerHTML = '<b>This tab is out of date</b>'
+          + 'Loaded from build <code>' + esc(String(STALE.page.from)) + '</code>, '
+          + 'server is now <code>' + esc(String(STALE.page.to)) + '</code>. '
+          + 'Reloading is safe and costs nothing.'
+          + '<br><button id="reloadnow">reload now</button>';
+        n.querySelector('#reloadnow')?.addEventListener('click', () => location.reload());
+      } else {
+        n.className = ''; n.innerHTML = '';
+      }
     }
     // A process running code older than the files it serves will hand out
     // buttons whose endpoints do not exist. Say so, loudly, in the header.
@@ -1639,19 +1676,10 @@ setInterval(async () => {
     // its files; here, the tab is behind the process.
     const serverBuild = h.version?.commit;
     if (serverBuild && PAGE_BUILD !== 'unknown' && serverBuild !== PAGE_BUILD){
-      if (!document.getElementById('oldpage')){
-        const b = document.createElement('div');
-        b.id = 'oldpage';
-        b.innerHTML = `this page was loaded from an older build `
-          + `(<code>${esc(PAGE_BUILD)}</code> \u2192 server is <code>${esc(serverBuild)}</code>) `
-          + `\u2014 <button id="reloadnow">reload</button> to get features added since`;
-        document.body.appendChild(b);
-        document.getElementById('reloadnow').addEventListener('click', () => location.reload());
-      }
+      STALE.page = { from: PAGE_BUILD, to: serverBuild };
     } else {
-      document.getElementById('oldpage')?.remove();
+      STALE.page = null;
     }
-    syncBanners();
 
     // A warning must TRACK the condition, not merely announce it once.
     //
@@ -1660,14 +1688,8 @@ setInterval(async () => {
     // red banner while restart_required was already false. A signal that stays
     // red after the fix teaches people to ignore red, which costs more than the
     // warning was ever worth.
-    if (!h.version?.restart_required) document.getElementById('stalebar')?.remove();
-    if (h.version?.restart_required && !document.getElementById('stalebar')){
-      const b = document.createElement('div');
-      b.id = 'stalebar';
-      b.textContent = 'this mirror\u2019s code changed on disk \u2014 restart it to apply (the page may show controls the server does not have)';
-      document.body.appendChild(b);
-    }
-    syncBanners();
+    STALE.src = Boolean(h.version?.restart_required);
+    syncStale();
     if (h.limits?.max_upload_bytes)
       document.getElementById('uplimit').textContent = fmtBytes(h.limits.max_upload_bytes);
     INSTANCE_NAME = h.instance || INSTANCE_NAME;
