@@ -52,6 +52,11 @@ export class TranscriptTailer {
 
     // sidecar dir: same path minus ".jsonl"
     this.sidecarDir = transcriptPath.replace(/\.jsonl$/, '');
+    // Readability is EVIDENCE, not an assumption. A deaf verdict is only
+    // meaningful if the transcript could be read at all, so the counters that
+    // decide that live here and are published on /health.
+    this.counters = { lines: 0, parsed: 0, unparsable: 0,
+                      lastParseOkAt: null, lastParseFailAt: null };
     this.subagentDir = path.join(this.sidecarDir, 'subagents');
 
     /** @type {Map<string, {offset:number, partial:string, ctx:object}>} */
@@ -180,8 +185,36 @@ export class TranscriptTailer {
     for (const line of lines) {
       if (!line.trim()) continue;
       let entry;
+      this.counters.lines++;
       try { entry = JSON.parse(line); }
-      catch { continue; } // unparseable: skip, never fatal (Law 4.2)
+      catch {
+        // Never fatal (Law 4.2) — but never SILENT either, and it used to be.
+        //
+        // This was a bare `continue`. If the transcript became unparseable, every
+        // line was skipped without a counter or a log, so no entry ever reached
+        // confirmDelivery, stats.lastEventAt stopped advancing, the quiet gate was
+        // satisfied, and the mirror announced CHANNEL APPEARS DEAF. The truth was
+        // "I cannot read the transcript." A check that cannot look was reporting
+        // absence — Genevieve's third door, in my own tailer, under a comment
+        // justifying the silence.
+        //
+        // Note the asymmetry that hid it: normalize errors two lines below were
+        // ALWAYS logged. The more fundamental failure was the quieter one.
+        //
+        // Found because Forge-ba0e added a parser self-test to Loadstone's V2
+        // canary so a schema change reports "I can't read this" instead of a
+        // confident DEAF, and I went looking for the same hole here.
+        this.counters.unparsable++;
+        this.counters.lastParseFailAt = Date.now();
+        if (this.counters.unparsable === 1 || this.counters.unparsable % 200 === 0) {
+          this.log(`UNPARSABLE transcript line (#${this.counters.unparsable} of `
+            + `${this.counters.lines} read) — if this is climbing, the mirror cannot `
+            + `read the session and MUST NOT be believed when it says deaf`);
+        }
+        continue;
+      }
+      this.counters.parsed++;
+      this.counters.lastParseOkAt = Date.now();
       try { this.onRaw(entry); }
       catch (err) { this.log(`onRaw error: ${err.message}`); }
       try { out.push(...normalizeEntry(entry, state.ctx)); }

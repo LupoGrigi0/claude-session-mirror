@@ -311,6 +311,22 @@ const QUIET_BEFORE_DEAF_MS = Math.max(2000, Math.round(DEAF_AFTER_MS / 3));
 const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
 let lastConfirmedAt = null;
 let deafAnnounced = false;
+let unreadableAnnounced = false;
+/**
+ * Can we currently read the transcript at all?
+ *
+ * TRUE when nothing has failed to parse, or when a successful parse is at least
+ * as recent as the last failure — a few malformed lines in a healthy stream are
+ * normal and must not suppress a real deaf verdict. FALSE only when parsing is
+ * failing and nothing has parsed since, which is the state where every other
+ * signal derived from the transcript is meaningless.
+ */
+function transcriptReadable() {
+  const c = tailer?.counters;
+  if (!c || !c.unparsable) return true;
+  if (!c.lastParseFailAt) return true;
+  return (c.lastParseOkAt ?? 0) >= c.lastParseFailAt;
+}
 
 /** Collect every string in an entry, however nested. */
 function strings(o, out = [], depth = 0) {
@@ -393,6 +409,27 @@ setInterval(() => {
   if (oldest !== null && oldest > DEAF_AFTER_MS && !sessionQuiet && !deafAnnounced) {
     return;   // busy, not deaf — keep waiting, say nothing
   }
+  // THIRD DOOR. The quiet gate separates "busy" from "deaf". It cannot separate
+  // "I cannot read the transcript" from "deaf", because an unreadable transcript
+  // produces no events either — which satisfies sessionQuiet and would have us
+  // announce deaf with total confidence about a channel we have no evidence on.
+  //
+  // So refuse to rule. An unreadable transcript is a LOUDER problem than a deaf
+  // channel and it is OURS, not the channel's; saying "deaf" would send someone
+  // to debug the wrong component.
+  if (!transcriptReadable() && !deafAnnounced) {
+    if (!unreadableAnnounced) {
+      unreadableAnnounced = true;
+      const c = tailer?.counters;
+      log(`CANNOT READ THE TRANSCRIPT — ${c?.unparsable} unparsable line(s) of `
+        + `${c?.lines}. Withholding any deaf verdict: with no readable transcript `
+        + `there is no evidence about the channel either way. This is our bug, not theirs.`);
+      broadcastEphemeral({ type: 'channel_state',
+        body: { deaf: null, unreadable: true, unparsable: c?.unparsable ?? null } });
+    }
+    return;
+  }
+  unreadableAnnounced = false;
   if (oldest !== null && oldest > DEAF_AFTER_MS && !deafAnnounced) {
     deafAnnounced = true;
     log(`WARNING: ${awaitingConfirm.length} message(s) accepted by the channel `
@@ -1499,7 +1536,11 @@ const server = http.createServer(async (req, res) => {
         unconfirmed: awaitingConfirm.length,
         oldest_unconfirmed_s: oldestUnconfirmedMs() === null
           ? null : Math.round(oldestUnconfirmedMs() / 1000),
-        channel_appears_deaf: deafAnnounced,
+        // null, not false, when we cannot read the transcript: with no readable
+        // transcript there is no evidence about the channel in either direction.
+        channel_appears_deaf: transcriptReadable() ? deafAnnounced : null,
+        transcript_readable: transcriptReadable(),
+        transcript_unparsable_lines: tailer?.counters?.unparsable ?? null,
         // Distinguishes "waiting on a busy session" from "nothing is listening".
         session_quiet_s: Math.round((Date.now() - (stats.lastEventAt || Date.now())) / 1000),
         last_confirmed_delivery: lastConfirmedAt
