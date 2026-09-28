@@ -312,6 +312,7 @@ const awaitingConfirm = [];   // {probe, at, nonce} — probe is a text prefix
 let lastConfirmedAt = null;
 let deafAnnounced = false;
 let unreadableAnnounced = false;
+let notRunningAnnounced = false;
 /**
  * Can we currently read the transcript at all?
  *
@@ -321,6 +322,76 @@ let unreadableAnnounced = false;
  * failing and nothing has parsed since, which is the state where every other
  * signal derived from the transcript is meaningless.
  */
+// --- is the mind actually RUNNING? a THIRD independent ledger -------------
+//
+// Reported by Forge-ba0e 2026-09-28 from the Linux chassis: after `kill -9` his
+// canary said DEAF "maybe frozen" while the registry already knew the mind was
+// not running. Same hole here, and worse, because nothing in this file consulted
+// liveness at all — tmux was used only to WRITE into the session.
+//
+// Trace it: the mind dies, the transcript stops growing, its existing content
+// still parses (so transcriptReadable() is true), no events arrive (so the quiet
+// gate is satisfied), and we announce CHANNEL APPEARS DEAF. **The channel is
+// fine. The mind is gone.** Whoever reads that verdict debugs the wrong thing —
+// the identical failure the unparsable-line fix addressed, one ledger further out.
+//
+// Forge's rule, and it is better than mine: **an instrument should use every
+// independent ledger it has before it rules.**
+//
+// THREE-VALUED, and the null case carries the whole safety argument:
+//   true   tmux says the session exists
+//   false  tmux says it does not  -> NOT RUNNING, and we must not say "deaf"
+//   null   we could not look (no tmux, not configured, tmux absent on Windows)
+//
+// When it is null we STILL allow a deaf verdict. Suppressing on "unknown" would
+// silently disable real deaf detection everywhere tmux is not present, which is
+// a worse failure than the one being fixed: it would make the detector quietly
+// useless on exactly the platforms nobody is watching. We only override the
+// verdict on an AFFIRMATIVE "not running".
+//
+// AND THE TRAP I WALKED STRAIGHT INTO, caught by the suite before commit:
+// `cfg.tmuxSession` FALLS BACK TO THE INSTANCE ID. It is a non-empty string for
+// every named instance whether or not tmux is running one. So
+// `tmux has-session -t <fallback-guess>` exits 1 for almost everybody, which I
+// was reading as "the mind is not running" — and that silently suppressed the
+// deaf verdict FLEET-WIDE. deaf-channel.sh went from 26 green to 5 failures.
+//
+// My own comment ~40 lines above says this in as many words about the
+// permissions grant: *tmuxSession falls back to the instance id, so it is true
+// for any named instance whether or not tmux exists.* I read that comment
+// earlier the same day and then treated the same guess as a ledger.
+//
+// **A fallback default is not a measurement.** Liveness is evidence ONLY when
+// the session name was stated explicitly; otherwise we could not look, and
+// could-not-look is null.
+const TMUX_EXPLICIT = Boolean(process.env.MIRROR_TMUX_SESSION);
+let liveness = { alive: null, at: 0 };
+function checkLiveness() {
+  if (!TMUX_EXPLICIT || !cfg.tmuxSession) { liveness = { alive: null, at: Date.now() }; return; }
+  execFile('tmux', ['has-session', '-t', cfg.tmuxSession], { timeout: 2000 }, (err) => {
+    // exit 0 = exists; exit 1 = does not; anything else (tmux missing, ENOENT,
+    // timeout) is NOT evidence of absence and must stay null.
+    let alive = null;
+    if (!err) alive = true;
+    else if (err.code === 1) alive = false;
+    liveness = { alive, at: Date.now() };
+  });
+}
+
+/**
+ * Are we ENTITLED to say anything about the channel at all?
+ *
+ * Two blind states, and they must never drift apart:
+ *   - the transcript cannot be read  -> no evidence arrives, by definition
+ *   - the mind is not running        -> nothing could arrive, by definition
+ *
+ * In both, "not deaf" is as unfounded as "deaf". Callers get null.
+ * `liveness.alive === null` (could not look) does NOT blind us — see checkLiveness.
+ */
+function canRuleOnChannel() {
+  return transcriptReadable() && liveness.alive !== false;
+}
+
 function transcriptReadable() {
   const c = tailer?.counters;
   if (!c || !c.unparsable) return true;
@@ -430,6 +501,22 @@ setInterval(() => {
     return;
   }
   unreadableAnnounced = false;
+  // Every ledger before the verdict. An affirmative "not running" outranks a
+  // deaf verdict: it names the real problem and points at the right component.
+  if (oldest !== null && oldest > DEAF_AFTER_MS && liveness.alive === false) {
+    if (!notRunningAnnounced) {
+      notRunningAnnounced = true;
+      log(`SESSION IS NOT RUNNING — tmux has no session "${cfg.tmuxSession}". `
+        + `${awaitingConfirm.length} message(s) unconfirmed, but the channel is NOT `
+        + `the problem: there is nothing on the other end to receive them. `
+        + `Withholding the deaf verdict.`);
+      broadcastEphemeral({ type: 'channel_state',
+        body: { deaf: null, session_running: false,
+                unconfirmed: awaitingConfirm.length } });
+    }
+    return;
+  }
+  notRunningAnnounced = false;
   if (oldest !== null && oldest > DEAF_AFTER_MS && !deafAnnounced) {
     deafAnnounced = true;
     log(`WARNING: ${awaitingConfirm.length} message(s) accepted by the channel `
@@ -442,6 +529,19 @@ setInterval(() => {
     });
   }
 }, DEAF_POLL_MS).unref();
+// SAMPLED ONLY WHILE A MESSAGE IS OUTSTANDING, for two reasons found by the suite:
+//
+//   1. commands.sh stubs `tmux` and asserts the stub log is EMPTY. An
+//      unconditional poll wrote `has-session` into it and failed that assertion —
+//      my liveness probe was an observable side effect on a shared resource.
+//   2. It was also simply wasteful: spawning a process every DEAF_POLL_MS forever
+//      to answer a question nobody is asking. Liveness only matters when there is
+//      an unconfirmed message whose fate depends on it.
+//
+// Consequence, stated rather than hidden: `session_running` on /health is null
+// until something is actually outstanding. That is honest — we have not looked,
+// and we do not pretend a fresh reading exists when none was taken.
+setInterval(() => { if (awaitingConfirm.length) checkLiveness(); }, DEAF_POLL_MS).unref();
 
 const sendJournal = path.join(cfg.dataDir, 'sent.jsonl');
 function journalSend(who, text, nonce) {
@@ -1536,10 +1636,15 @@ const server = http.createServer(async (req, res) => {
         unconfirmed: awaitingConfirm.length,
         oldest_unconfirmed_s: oldestUnconfirmedMs() === null
           ? null : Math.round(oldestUnconfirmedMs() / 1000),
-        // null, not false, when we cannot read the transcript: with no readable
-        // transcript there is no evidence about the channel in either direction.
-        channel_appears_deaf: transcriptReadable() ? deafAnnounced : null,
+        // null, not false, whenever we are not ENTITLED to rule. Caught by
+        // test/session-not-running.sh: this reported `false` while the mind was
+        // not running, which asserts "the channel is fine" on no evidence — the
+        // same lie as a wrong `true`, pointed the other way. Both blind states
+        // now go through one predicate so they cannot drift apart.
+        channel_appears_deaf: canRuleOnChannel() ? deafAnnounced : null,
         transcript_readable: transcriptReadable(),
+        // null = could not look (no tmux / not configured), never collapsed to false
+        session_running: liveness.alive,
         transcript_unparsable_lines: tailer?.counters?.unparsable ?? null,
         // Distinguishes "waiting on a busy session" from "nothing is listening".
         session_quiet_s: Math.round((Date.now() - (stats.lastEventAt || Date.now())) / 1000),
