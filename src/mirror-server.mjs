@@ -679,6 +679,13 @@ setInterval(() => {
 // genuine re-point looks like too. (Genevieve's third door; Zara made me state
 // it as code rather than as a resolution in serves_casing this same evening.)
 const TRANSCRIPT_DIR = cfg.transcript ? path.dirname(cfg.transcript) : null;
+/** Seconds since the file we are actually tailing was last modified, or null. */
+function tailedQuietSeconds() {
+  if (!cfg.transcript) return null;
+  try { return Math.round((Date.now() - fs.statSync(cfg.transcript).mtimeMs) / 1000); }
+  catch { return null; }   // cannot stat != zero seconds
+}
+
 function newestTranscript() {
   if (!TRANSCRIPT_DIR) return null;
   let best = null, bestM = -1;
@@ -708,9 +715,12 @@ if (cfg.mode === 'full') setInterval(() => {
   newestSeen = newestTranscript();
   if (!repointedAt && newestSeen && newestSeen !== cfg.transcript) {
     repointedAt = Date.now();
-    log(`TRANSCRIPT RE-POINTED — tailing ${cfg.transcript} but the newest on disk is ` +
-        `${newestSeen}. This mirror is publishing NOTHING from the live session. ` +
-        `Restart it to re-resolve.`);
+    // Was "TRANSCRIPT RE-POINTED ... publishing NOTHING", which is a conclusion,
+    // not an observation. A sibling usually means another session ran here.
+    log(`a NEWER SIBLING transcript appeared: tailing ${cfg.transcript}, newest in ` +
+        `the directory is ${newestSeen}. This is NOT proof of a re-point — another ` +
+        `session running in this directory looks identical. Check tailed_quiet_s and ` +
+        `session_running before concluding anything.`);
   }
 }, REPOINT_POLL_MS).unref();
 
@@ -1600,11 +1610,38 @@ const server = http.createServer(async (req, res) => {
       } : null,
       // What file is actually being read, and is it still the right one.
       // `is_newest: null` = could not look; never collapse that into false.
+      // WHAT THESE ACTUALLY MEAN — the field was named for a stronger claim than
+      // the evidence supports, and I found out by accident on 2026-10-03.
+      //
+      // Running `claude mod list` (not a subcommand — Claude Code treats an
+      // unknown one as a PROMPT) spawned two sessions in MY project directory.
+      // Their transcripts are siblings of mine, so `newestTranscript()` — which
+      // takes the newest *.jsonl by mtime — would have picked one and reported
+      // is_newest:false. NOTHING had re-pointed. Mine only read true by luck: my
+      // own file happened to be touched one second later.
+      //
+      // So `newest_sibling_on_disk` is honest and `is_newest` was not. A newer
+      // sibling transcript means ANOTHER SESSION RAN IN THIS DIRECTORY, which is
+      // ordinary and is not evidence about my session at all.
+      //
+      // This is Forge-ba0e's rejected design #1 one layer down — *resume "the
+      // newest transcript": a GUESS became an IDENTITY*. He rejected it for
+      // resuming; I had shipped the same guess for alarming. Newest-by-mtime is
+      // not an oracle for session identity in EITHER direction.
+      //
+      // Kept rather than deleted because the stale-tail failure it was built for
+      // is real: a tailed file that stops growing while the mind is alive is worth
+      // seeing. But that is what `tailed_quiet_s` plus `session_running` say, and
+      // they say it without guessing.
       transcript: cfg.mode !== 'full' ? null : {
         tailing: cfg.transcript,
-        newest_on_disk: newestSeen,
-        is_newest: newestSeen === null ? null : (newestSeen === cfg.transcript),
-        repointed_for_s: repointedAt ? Math.round((Date.now() - repointedAt) / 1000) : null,
+        // Renamed from newest_on_disk/is_newest: a sibling is not a re-point.
+        newest_sibling_on_disk: newestSeen,
+        tailing_is_newest_in_dir: newestSeen === null ? null : (newestSeen === cfg.transcript),
+        // How long the file we ACTUALLY tail has been unmodified. This is the
+        // signal with no guess in it.
+        tailed_quiet_s: tailedQuietSeconds(),
+        sibling_appeared_for_s: repointedAt ? Math.round((Date.now() - repointedAt) / 1000) : null,
       },
       write_path: {
         channel_url: cfg.channelUrl || null,

@@ -18,8 +18,12 @@
 #
 # What would have to be true:
 #   1. /health states the path being tailed  (it exposed nothing before)
-#   2. a mirror on the newest transcript reports is_newest true
-#   3. a NEWER .jsonl appearing flips is_newest false and starts the clock
+#   2. a mirror on the newest transcript reports tailing_is_newest_in_dir true
+#   3. a NEWER SIBLING .jsonl flips it false and starts the clock -- and this is
+#      NOT proof of a re-point: another session running in the same directory is
+#      indistinguishable. Found 2026-10-03 when `claude mod list` (an unknown
+#      subcommand is treated as a PROMPT) spawned two sessions in Cairn's own
+#      project dir. The field was renamed because it claimed more than it knew.
 #   4. "could not look" is null, NEVER false — absence and unreadable differ
 set -u
 DIR=$(mktemp -d)
@@ -45,25 +49,26 @@ t(){ curl -s "http://127.0.0.1:$PORT/health" | node -e '
     const t=JSON.parse(s).transcript;
     process.stdout.write(JSON.stringify([
       t===null?"null":(t.tailing?"set":"unset"),
-      t===null?"null":String(t.is_newest),
-      t===null?"null":(t.repointed_for_s===null?"null":"num")]));});'; }
+      t===null?"null":String(t.tailing_is_newest_in_dir),
+      t===null?"null":(t.sibling_appeared_for_s===null?"null":"num")]));});'; }
 
 echo "== 1. the path is stated at all =="
 V=$(t); echo "  $V"
 case "$V" in '["set",'*) ok 1 "/health names the transcript it is tailing";; *) ok 0 "/health names the transcript it is tailing";; esac
 
-echo "== 2. newest transcript -> is_newest true =="
-case "$V" in *'"true"'*) ok 1 "is_newest true while tailing the newest";; *) ok 0 "is_newest true while tailing the newest";; esac
-case "$V" in *',"null"]') ok 1 "repointed_for_s null while healthy";; *) ok 0 "repointed_for_s null while healthy";; esac
+echo "== 2. newest transcript -> tailing_is_newest_in_dir true =="
+case "$V" in *'"true"'*) ok 1 "true while tailing the newest in dir";; *) ok 0 "true while tailing the newest in dir";; esac
+case "$V" in *',"null"]') ok 1 "sibling_appeared_for_s null while healthy";; *) ok 0 "sibling_appeared_for_s null while healthy";; esac
 
 echo "== 3. a newer .jsonl appears -> detected =="
 sleep 1
 printf '%s\n' '{"type":"summary","summary":"new session"}' > "$DIR/proj/new.jsonl"
 sleep 1.2
 V=$(t); echo "  $V"
-case "$V" in *'"false"'*) ok 1 "is_newest flips false when the session re-points";; *) ok 0 "is_newest flips false when the session re-points";; esac
-case "$V" in *',"num"]') ok 1 "repointed_for_s starts counting";; *) ok 0 "repointed_for_s starts counting";; esac
-grep -q "TRANSCRIPT RE-POINTED" "$DIR/server.log" && ok 1 "logs the re-point loudly" || ok 0 "logs the re-point loudly"
+case "$V" in *'"false"'*) ok 1 "flips false when a newer sibling appears";; *) ok 0 "flips false when a newer sibling appears";; esac
+case "$V" in *',"num"]') ok 1 "sibling_appeared_for_s starts counting";; *) ok 0 "sibling_appeared_for_s starts counting";; esac
+grep -q "NEWER SIBLING transcript appeared" "$DIR/server.log" && ok 1 "logs a sibling WITHOUT claiming a re-point" || ok 0 "logs a sibling WITHOUT claiming a re-point"
+grep -q "TRANSCRIPT RE-POINTED" "$DIR/server.log" && ok 0 "must NOT assert a re-point from a sibling alone" || ok 1 "must NOT assert a re-point from a sibling alone"
 
 echo "== 4. could-not-look is null, not false =="
 # The whole directory becomes unreadable: readdir throws, so newestTranscript()
@@ -74,10 +79,10 @@ sleep 1.2
 V=$(curl -s "http://127.0.0.1:$PORT/health" | node -e '
   let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
     const t=JSON.parse(s).transcript;
-    process.stdout.write(JSON.stringify([t.newest_on_disk,t.is_newest]));});')
+    process.stdout.write(JSON.stringify([t.newest_sibling_on_disk,t.tailing_is_newest_in_dir]));});')
 chmod 755 "$DIR/proj"
 echo "  $V"
-case "$V" in '[null,null]') ok 1 "unreadable dir -> is_newest null (not false)";; *) ok 0 "unreadable dir -> is_newest null (not false)";; esac
+case "$V" in '[null,null]') ok 1 "unreadable dir -> null (not false)";; *) ok 0 "unreadable dir -> null (not false)";; esac
 
 echo
 echo "passed=$pass failed=$fail"
