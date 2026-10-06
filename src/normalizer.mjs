@@ -215,6 +215,79 @@ function commandEvent(base, from, cmd, index) {
   };
 }
 
+/**
+ * WHO ACTUALLY SPOKE on a `user`-role entry.
+ *
+ * Claude Code feeds the human's typing, channel messages, agent completions,
+ * system reminders AND bare harness strings through the SAME `user` role. The
+ * role is a TRANSPORT, NOT A SPEAKER. Defaulting it to the human means any
+ * injected imperative arrives wearing the most trusted name in the system.
+ *
+ * Found by Bastion-3012, 2026-10-05: a harness string — "The previous response
+ * failed to produce a valid tool call. Please retry the tool call now." — was
+ * rendered attributed to Lupo and timestamped as his message. His distinction is
+ * the one that matters: a misattributed tool RESULT is cosmetic; a misattributed
+ * IMPERATIVE is a trust-boundary bug, because the permission model rests on a
+ * mind being able to tell the human's instructions from machine text. And it
+ * cannot be fixed by the recipient being careful — "an injected imperative that
+ * coincides with what the recipient was already going to do is undetectable from
+ * the recipient's side." So the repair has to be here, in the assembler.
+ *
+ * MEASURED 2026-10-06 over 13,198 entries of one real transcript: Claude Code
+ * ALREADY SUPPLIES positive provenance and this file was ignoring it.
+ *
+ *   origin.kind 'human'             promptSource 'typed'/'queued'  -> the human
+ *   origin.kind 'channel'           promptSource 'system'          -> external sender
+ *   origin.kind 'task-notification' promptSource 'system'          -> agent/harness
+ *   origin ABSENT                   promptSource 'system'          -> HARNESS, bare text
+ *   both absent                                                    -> legacy / unknown
+ *
+ * The fourth row is the dangerous one and it is not hypothetical: THIS MIRROR'S
+ * OWN heartbeat cron fires as bare `user` text with promptSource 'system' and no
+ * wrapper, and was rendering in Lupo's bubble — an imperative written by me to
+ * me, displayed as his. Four of them, before anyone noticed.
+ *
+ * THE RULE, Bastion's, and it is the whole point:
+ *   "Defaulting an unattributed imperative to the most trusted speaker in the
+ *    system is the worst available default."
+ *
+ * So `promptSource === 'system'` is a HARD DISQUALIFIER from human attribution,
+ * and `origin.kind === 'human'` is the only positive confirmation.
+ *
+ * DELIBERATE, DATED COMPROMISE: entries with NEITHER field are treated as the
+ * human, because those fields postdate older Claude Code and a hard disqualifier
+ * on absence would misattribute every historical transcript. That is a judgement
+ * about a known population, not an oversight — and it is safe in the direction
+ * that matters, because the injected strings we have seen all carry
+ * promptSource 'system'. If a harness string ever arrives with NO provenance
+ * fields at all, this returns the human and is wrong. Re-check on any upgrade.
+ *
+ * Transport note: the harness ALREADY labels cross-session messages "not typed
+ * by your user" and bars them from approving anything (Lodestone-8ec9, measured).
+ * Attribution is structural on that path. This function exists so the UI
+ * PRESERVES the provenance the transport already carries instead of re-deriving
+ * it — re-deriving is where it got lost.
+ *
+ * @returns {{id:string, kind:string, display:string}}
+ */
+export function attributeUserEntry(entry, ctx = {}) {
+  const human = { id: ctx.speaker?.id || 'user',
+                  kind: ctx.speaker?.kind || 'human',
+                  display: ctx.speaker?.display || 'User' };
+  const kind = entry?.origin?.kind || null;
+  const src  = entry?.promptSource || null;
+
+  if (kind === 'human') return human;                       // positive evidence
+  if (kind === 'channel') {
+    const who = entry.origin.server || 'channel';
+    return { id: who, kind: 'channel', display: who };
+  }
+  if (kind === 'task-notification') return { id: 'agent', kind: 'system', display: 'agent' };
+  if (kind) return { id: String(kind), kind: 'system', display: String(kind) };
+  if (src === 'system') return { id: 'harness', kind: 'system', display: 'harness' };
+  return human;                                             // legacy, see above
+}
+
 export function normalizeEntry(entry, ctx = {}) {
   const type = entry?.type;
   if (!CONVERSATIONAL.has(type)) return [];
@@ -236,7 +309,7 @@ export function normalizeEntry(entry, ctx = {}) {
   const from = ctx.agentId
     ? { id: ctx.agentId, kind: 'subagent', display: ctx.agentLabel || 'subagent', agent_id: ctx.agentId }
     : type === 'user'
-      ? { id: ctx.speaker?.id || 'user', kind: ctx.speaker?.kind || 'human', display: ctx.speaker?.display || 'User' }
+      ? attributeUserEntry(entry, ctx)
       : { id: ctx.instance, kind: 'instance', display: ctx.instanceDisplay || ctx.instance };
 
   const content = msg.content;
@@ -340,8 +413,7 @@ export function normalizeEntry(entry, ctx = {}) {
       const raw = typeof block.content === 'string' ? block.content
                 : block.content.map(x => (x && x.type === 'text') ? x.text : '').join('');
       events.push({ ...base, index, type: 'question',
-        from: { id: ctx.speaker?.id || 'user', kind: ctx.speaker?.kind || 'human',
-                display: ctx.speaker?.display || 'User' },
+        from: attributeUserEntry(entry, ctx),
         body: (() => { const a = detectQuestionAnswer(raw);
                        return { tool_use_id: block.tool_use_id || null,
                                 answered: a.picks,

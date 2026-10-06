@@ -821,13 +821,38 @@ let pending = [];
 let pendingAt = 0;
 let lastAssert = 0;
 
+// WHY THIS STATE EXISTS, and it is Bastion-3012's requirement, 2026-10-05:
+//
+//   "An empty pending-list must mean UNKNOWN, not OK."
+//
+// `pending.length === 0` previously meant FOUR different things and reported all
+// four identically: there are no requests; the last poll failed; no poll has ever
+// succeeded; or no channel URL is configured so nothing is ever polled at all.
+// The last is the purest false green — a mirror with MIRROR_CHANNEL_URL unset
+// reports "0 pending" forever, cheerfully, having never looked once.
+//
+// His measured cost for the real version of this: a digest agent of his blocked on
+// an approval for ~21 HOURS while he reported it "still waiting" four times. The
+// agent could not say it was stuck, Lupo could not see it was asking, and the only
+// actor who could approve it was describing it as slow.
+//
+// So the poll now records whether it could LOOK, separately from what it SAW.
+let pendingPoll = { ok: null, everOk: false, error: 'no poll attempted yet', at: 0 };
+
 async function pollPermissions() {
-  if (!cfg.channelUrl) return;
+  if (!cfg.channelUrl) {
+    pendingPoll = { ...pendingPoll, ok: false, error: 'no MIRROR_CHANNEL_URL configured' };
+    return;
+  }
   try {
     const r = await fetch(cfg.channelUrl + '/pending-permissions',
                           { signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return;
+    if (!r.ok) {
+      pendingPoll = { ...pendingPoll, ok: false, error: `channel returned HTTP ${r.status}` };
+      return;
+    }
     const d = await r.json();
+    pendingPoll = { ok: true, everOk: true, error: null, at: Date.now() };
     const next = Array.isArray(d.pending) ? d.pending : [];
     const before = pending.map(x => x.request_id).join(',');
     const after  = next.map(x => x.request_id).join(',');
@@ -853,7 +878,13 @@ async function pollPermissions() {
       // A pending list is state, not history. The log is for conversation.
       broadcastEphemeral(permissionsEvent());
     }
-  } catch { /* channel down or restarting — leave the last known state */ }
+  } catch (e) {
+    // Leave the last known LIST (a card must not vanish because one poll failed),
+    // but record that this poll could not look. The two are different facts and
+    // conflating them is the bug above.
+    pendingPoll = { ...pendingPoll, ok: false,
+                    error: `channel unreachable: ${e?.name || 'error'}` };
+  }
 }
 setInterval(pollPermissions, 2000).unref();
 
@@ -1596,6 +1627,25 @@ const server = http.createServer(async (req, res) => {
       // is what an unauthenticated caller legitimately wants from it.
       pending_permissions_count: pending.length,
       pending_age_s: pendingAt ? Math.round((Date.now() - pendingAt)/1000) : null,
+      // THREE-VALUED, per Bastion: an empty list is only OK if we could LOOK.
+      // A reader must be able to tell "nothing pending" from "I cannot tell".
+      // `null` = unknown. Never collapse it to false or to 0.
+      pending_permissions_known: pendingPoll.everOk && pendingPoll.ok ? true
+                               : pendingPoll.everOk ? null   // stale: list may be out of date
+                               : false,                      // never once looked successfully
+      pending_poll_ok: pendingPoll.ok,
+      pending_poll_error: pendingPoll.error,
+      pending_poll_age_s: pendingPoll.at ? Math.round((Date.now() - pendingPoll.at)/1000) : null,
+      // ⚠ SCOPE, stated because a clean list is misleading without it. This covers
+      // THIS SESSION ONLY. A SUB-AGENT blocked on approval does NOT appear here.
+      // Bastion's scope call, and it is the non-obvious half: the boundary is not
+      // per-instance, per-uid or per-box — his own requests arrive and his
+      // children's do not, same session, same uid, same box. It is a PARENT-vs-CHILD
+      // boundary inside one session tree, so anything reasoning about "can this mind
+      // reach a human" at instance granularity gets it wrong. Enumerating the tree is
+      // unbuilt; until it is, this field stops the omission being silent.
+      pending_permissions_scope: 'session',
+      pending_subagents_enumerated: false,
       // Published so the UI states the real limit rather than a hardcoded one
       // that drifts out of agreement with the server.
       limits: { max_upload_bytes: MAX_UPLOAD_BYTES },

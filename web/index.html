@@ -359,6 +359,7 @@
     <table class="cheat">
       <tr><td><code>**bold**</code></td><td><strong>bold</strong></td></tr>
       <tr><td><code>_italic_</code></td><td><em>italic</em></td></tr>
+      <tr><td><code>~~strike~~</code></td><td><del>strike</del></td></tr>
       <tr><td><code>`code`</code></td><td><code>code</code></td></tr>
       <tr><td><code>```</code> … <code>```</code></td><td>code block</td></tr>
       <tr><td><code># Heading</code></td><td>heading (1–4 <code>#</code>)</td></tr>
@@ -420,9 +421,20 @@ function md(s){
   s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, l, code) =>
     `\0${blocks.push(`<pre>${esc(code.replace(/\n$/,''))}</pre>`) - 1}\0`);
   s = esc(s)
-    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    // Inline code is STASHED, exactly like a fenced block, not merely wrapped.
+    // BUG FOUND 2026-10-06 by test/md-format.mjs on its first run: wrapping left the
+    // content in the stream, so every rule BELOW this line still fired inside it —
+    // `**x**` rendered bold, `~~x~~` rendered struck. Pre-existing; the ``` path was
+    // protected and this one never was. Content is already escaped by esc(s) above,
+    // so it must NOT be escaped again here.
+    .replace(/`([^`\n]+)`/g, (_, code) => `\0${blocks.push(`<code>${code}</code>`) - 1}\0`)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    // ~~strike~~ -> <del>, not <s>. This family uses strikethrough to keep a corrected
+    // error VISIBLE instead of deleting it, so the semantic tag is the honest one.
+    // Runs after __bold__ so '~~' can never be eaten by an underscore rule, and the
+    // inner class excludes '~' so '~~a~~ and ~~b~~' cannot merge into one <del>.
+    .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
     .replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,!?)]|$)/g, '$1<em>$2</em>')
     .replace(/(^|\s)\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/(?:^\|.*\|[ \t]*\n)+/gm, tbl => {
