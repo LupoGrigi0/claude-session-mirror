@@ -29,6 +29,66 @@ echo "# mirror pid $PID, up $(ps -o etime= -p "$PID" | tr -d ' ')"
 echo "# captured $(date -u +%FT%TZ) — these are the LIVE values, not defaults"
 echo
 tr '\0' '\n' < "$ENVF" | grep -E '^MIRROR_' | sort | sed 's/^/export /'
+
+# ---- ONE CHECK THAT CAN DISAGREE WITH ITSELF ------------------------------
+# ADDED 2026-10-06, after Bastion's restart moved my port 22087 -> 22003 and
+# NOTHING WARNED ME.
+#
+# This script already captured MIRROR_PORT — it dumps every MIRROR_* var above,
+# and it always did. (I claimed otherwise and was wrong: I grepped this file for
+# the literal string "MIRROR_PORT" and found only the echoed example, because the
+# capture uses the PATTERN '^MIRROR_'. My instrument looked for a literal and the
+# code used a pattern, so it reported absence. I had already sent that false
+# claim to a colleague.)
+#
+# THE REAL GAP WAS THE COMPARISON. mirror-start.sh RE-DERIVES anything not
+# recorded in ~/.mirror-env, so a value that is live-but-unrecorded comes back
+# DIFFERENT on restart, silently. The 11-A STEP 2 check compares `interrupt` and
+# `commands` only — grants survived my restart and the PORT did not.
+#
+# Orla's rule is the design: "one check that agrees with itself proves nothing;
+# you built one that can disagree." A config file is self-consistent BY
+# CONSTRUCTION, so its consistency is evidence of nothing. The only useful
+# question is whether it agrees with a DIFFERENT source — and the running
+# process is that source.
+#
+# So: list every live MIRROR_* value that ~/.mirror-env does not record. This is
+# generic on purpose. The port is simply the one that bit me; the next one to
+# move will be a variable nobody has thought of yet.
+ENVFILE="$HOME/.mirror-env"
+echo
+echo "# ---- DRIFT CHECK: live values NOT recorded in ~/.mirror-env ----"
+if [ ! -r "$ENVFILE" ]; then
+  echo "#   NO ~/.mirror-env AT ALL — every value above would be re-derived on restart."
+  echo "#   That is not 'nothing to check'; it is the maximum possible drift."
+else
+  UNREC=""
+  while IFS= read -r line; do
+    k=${line%%=*}
+    # MIRROR_FLAGS is the one that IS recorded as a unit; skip derived-by-design ones.
+    case "$k" in MIRROR_ALLOW_SEND|MIRROR_ALLOW_UPLOAD) continue;; esac
+    grep -q "^[[:space:]]*${k}=" "$ENVFILE" 2>/dev/null || UNREC="$UNREC $k"
+  done < <(tr '\0' '\n' < "$ENVF" | grep -E '^MIRROR_[A-Z_]+=' | sort)
+  if [ -n "$UNREC" ]; then
+    for k in $UNREC; do
+      v=$(tr '\0' '\n' < "$ENVF" | sed -n "s/^${k}=//p")
+      printf '#   UNRECORDED  %-22s = %s\n' "$k" "$v"
+    done
+    echo "#"
+    echo "#   These are LIVE and ABSENT from ~/.mirror-env, so mirror-start.sh will"
+    echo "#   RE-DERIVE them. If a derivation differs from the live value, the restart"
+    echo "#   changes behaviour with no error. (MIRROR_ALLOW_SEND/UPLOAD are excluded:"
+    echo "#   they are derived from --with-input by design, which Zara-c207 established"
+    echo "#   after looking wider than the old check and finding what looked like alarms.)"
+    echo "#   NOT automatically an error — a deterministic derivation may be CANONICAL."
+    echo "#   Bastion measured that MIRROR_PORT=channelPort+1000 holds for all ten"
+    echo "#   mirrors, so my 22087 was the outlier and the re-derivation CORRECTED a"
+    echo "#   drift. Read each one; do not reflexively pin them."
+  else
+    echo "#   none — every live MIRROR_* value is recorded. A restart re-derives nothing."
+  fi
+fi
+
 echo
 echo "# then, from the repo root:"
 echo "#   kill $PID"
