@@ -55,6 +55,9 @@ tr '\0' '\n' < "$ENVF" | grep -E '^MIRROR_' | sort | sed 's/^/export /'
 # So: list every live MIRROR_* value that ~/.mirror-env does not record. This is
 # generic on purpose. The port is simply the one that bit me; the next one to
 # move will be a variable nobody has thought of yet.
+MIRROR_BIND_LIVE=$(tr '\0' '\n' < "$ENVF" | sed -n 's/^MIRROR_BIND=//p')
+MIRROR_PORT_LIVE=$(tr '\0' '\n' < "$ENVF" | sed -n 's/^MIRROR_PORT=//p')
+MIRROR_BASE_PATH_LIVE=$(tr '\0' '\n' < "$ENVF" | sed -n 's/^MIRROR_BASE_PATH=//p')
 ENVFILE="$HOME/.mirror-env"
 echo
 echo "# ---- DRIFT CHECK: live values NOT recorded in ~/.mirror-env ----"
@@ -70,10 +73,80 @@ else
     grep -q "^[[:space:]]*${k}=" "$ENVFILE" 2>/dev/null || UNREC="$UNREC $k"
   done < <(tr '\0' '\n' < "$ENVF" | grep -E '^MIRROR_[A-Z_]+=' | sort)
   if [ -n "$UNREC" ]; then
+    # ORDER BY CONSEQUENCE, NOT BY NAME — Bastion-3012's principle, 2026-10-06, and it is
+    # better than the flat list I shipped an hour earlier.
+    #
+    #   "11 flagged where 1 mattered is a real cost, and the fix is ordering by consequence,
+    #    not filtering by name: rank a variable by whether its loss changes an externally
+    #    visible contract. Port, bind address, base path appear in a URL a human has
+    #    bookmarked, so losing one produces a silent outage for a third party who cannot see
+    #    why. That ages well because it is a TEST, not an enumeration."
+    #
+    # So the test is DERIVED rather than listed: a value is EXTERNAL if it appears in the
+    # URL a human uses, or in the /health body this mirror publishes. Nothing is hardcoded —
+    # if a new variable becomes externally visible, this finds it without anyone editing a
+    # list. That is the property an allowlist cannot have.
+    # ⚠ CORRECTED IMMEDIATELY AFTER WRITING IT. My first version tested "does this value
+    # appear anywhere in the /health body", and classified 10 of 12 as external — because
+    # /health publishes almost everything, including MIRROR_INSTANCE and MIRROR_TRANSCRIPT.
+    # That tested "IS IT PUBLISHED" when Bastion's principle is "WOULD ITS LOSS BREAK A
+    # THIRD PARTY." An adjacent question with a confident answer — my named failure mode,
+    # inside the fix for the previous version of the same mistake.
+    #
+    # THE TWO THINGS A THIRD PARTY ACTUALLY DEPENDS ON:
+    #   1. THE URL they bookmarked — bind : port / base_path. Lose one and their link
+    #      dies with no visible cause.
+    #   2. WHAT THEY CAN DO once there — the write_path capabilities. Lose one and the
+    #      page still loads and they silently cannot type to the mind. That is the exact
+    #      failure the 11-A STEP 2 check was written for.
+    # Both derived at runtime: the URL from the live values, the capability set from
+    # /health's own write_path object rather than from a list of variable names.
+    URL="http://${MIRROR_BIND_LIVE}:${MIRROR_PORT_LIVE}${MIRROR_BASE_PATH_LIVE}"
+    HEALTH=$(curl -s --max-time 4 "${URL}/health" 2>/dev/null || true)
+    WP=$(printf '%s' "$HEALTH" | python3 -c "
+import json,sys
+try: print(json.dumps((json.load(sys.stdin) or {}).get('write_path') or {}))
+except Exception: print('')" 2>/dev/null || true)
+    EXT=""; INT=""
     for k in $UNREC; do
       v=$(tr '\0' '\n' < "$ENVF" | sed -n "s/^${k}=//p")
-      printf '#   UNRECORDED  %-22s = %s\n' "$k" "$v"
+      IS_EXT=no
+      # (1) IS it one of the three URL components — compared EXACTLY, not by substring.
+      #     A substring test put MIRROR_DISPLAY=Cairn in the external tier because the
+      #     base path is /Cairn. Caught by reading the output, same as the two before it.
+      case "$k" in
+        MIRROR_BIND)      [ "$v" = "$MIRROR_BIND_LIVE" ]      && IS_EXT=yes;;
+        MIRROR_PORT)      [ "$v" = "$MIRROR_PORT_LIVE" ]      && IS_EXT=yes;;
+        MIRROR_BASE_PATH) [ "$v" = "$MIRROR_BASE_PATH_LIVE" ] && IS_EXT=yes;;
+      esac
+      # (2) a capability flag — its value governs what write_path reports
+      case "$k" in MIRROR_ALLOW_*) [ -n "$WP" ] && IS_EXT=yes;; esac
+      if [ "$IS_EXT" = yes ]; then EXT="$EXT $k"; else INT="$INT $k"; fi
     done
+    if [ -n "$EXT" ]; then
+      echo "#   ---- EXTERNALLY VISIBLE: losing these breaks someone ELSE, silently ----"
+      for k in $EXT; do
+        v=$(tr '\0' '\n' < "$ENVF" | sed -n "s/^${k}=//p")
+        printf '#   ⚠ UNRECORDED  %-22s = %s\n' "$k" "$v"
+      done
+      echo "#      (these are the URL a human bookmarked, or a capability that governs"
+      echo "#       what they can DO once there. Lose a URL component and their link dies"
+      echo "#       with no visible cause; lose a capability and the page still loads and"
+      echo "#       they silently cannot type to the mind. This is the class that cost an"
+      echo "#       afternoon: my own port moved 22087 -> 22003 and nothing warned me.)"
+    fi
+    if [ -n "$INT" ]; then
+      echo "#   ---- internal: drift here is self-correcting or confuses only its owner ----"
+      for k in $INT; do
+        v=$(tr '\0' '\n' < "$ENVF" | sed -n "s/^${k}=//p")
+        printf '#     unrecorded  %-22s = %s\n' "$k" "$v"
+      done
+    fi
+    if [ -z "$HEALTH" ]; then
+      echo "#   NOTE: /health did not answer, so the external/internal split rests on the URL"
+      echo "#         alone. That is COULD-NOT-LOOK for the published-field half, not a clean"
+      echo "#         bill — a variable may be external and sorted below."
+    fi
     echo "#"
     echo "#   These are LIVE and ABSENT from ~/.mirror-env, so mirror-start.sh will"
     echo "#   RE-DERIVE them. If a derivation differs from the live value, the restart"
