@@ -38,7 +38,7 @@ param(
     [switch] $PermissionsOnly,
     # Every write capability is granted ONLY by being asked for. Never by flag
     # ordering, never inherited from the environment. All default OFF, including
-    # interrupt -- which differs deliberately from the bash launcher, see below.
+    # interrupt -- which now MATCHES the bash launcher (upstream 8309cce), see below.
     [switch] $WithInput,
     [switch] $WithInterrupt,
     [switch] $WithCommands,
@@ -180,11 +180,16 @@ $allowInterrupt = [int][bool]$WithInterrupt
 $allowCommands  = [int][bool]$WithCommands
 $allowUpload    = if ($PSBoundParameters.ContainsKey('WithUploads')) { [int][bool]$WithUploads } else { $allowSend }
 
-# DELIBERATE DIVERGENCE from the bash launcher: it defaults interrupt ON in full
-# mode ("there is a tmux session to interrupt"). There is no tmux here, so the
-# premise is absent -- and defaulting a write capability ON because of a
-# component that does not exist is exactly the kind of inherited assumption this
-# port exists to find. Interrupt stays OFF unless asked for.
+# PARITY, not divergence. This comment once called itself a DELIBERATE DIVERGENCE:
+# the bash launcher defaulted interrupt ON in full mode ("there is a tmux session
+# to interrupt"). Lodestone diverged loudly instead of inheriting it, because there
+# is no tmux here -- and the premise was worse than that: MIRROR_TMUX_SESSION falls
+# back to the instance id, so it was a NAME, never a verified session.
+# Upstream then converged: commit 8309cce (2026-08-30) made interrupt OFF by
+# default in every mode, matching this port. So this is now parity, and saying so
+# matters -- a stale "divergence" comment invites the next porter to preserve a
+# difference that no longer exists. Interrupt stays OFF unless asked for.
+# Corrected by Lantern-4224 on Cairn-2001's review, 2026-10-08.
 
 $env:MIRROR_BIND      = $Bind
 # Parity with bin/mirror-start.sh:317-318. The Windows port omitted these, so the
