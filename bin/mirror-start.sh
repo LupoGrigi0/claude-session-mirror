@@ -231,6 +231,52 @@ if [[ $PERMS_ONLY -eq 0 ]]; then
     for c in "${CANDIDATES[@]}"; do
       [[ -f "$c/$SID.jsonl" ]] && { PROJ="$c"; break; }
     done
+
+    # ---- UUID SEARCH, the last resort before refusing. Added 2026-10-09. ---------
+    #
+    # Measured by Forge-ba0e on Den (2.1.283, n=1), correcting my own rule:
+    #   at her crossing 2026-09-30 the transcript was at projects/-home-forge-BlackWolf-Forge/
+    #   she called EnterWorktree MID-SESSION on 10-01
+    #   today that directory holds NO .jsonl, and the FULL 76 MB history is under
+    #     projects/-home-forge-BlackWolf-Forge--claude-worktrees-forge-docs-2026-10-01/
+    #
+    # So the project slug follows the session's CURRENT cwd, and an in-session worktree
+    # switch MOVES the transcript, carrying its whole history. My ledger 006 said "keyed
+    # to the LAUNCH cwd" — correct for the launch, INCOMPLETE for a session that changes
+    # cwd later. Both slug candidates above are derived from a RECORDED workdir, so
+    # neither can find a transcript that has moved.
+    #
+    # Forge's fix shape, which is the same advice she gave Crossing for Ferry: find the
+    # transcript BY SESSION UUID, never by cwd. A uuid is the session's name for itself
+    # and it does not move when the directory does.
+    #
+    # EXACTLY ONE MATCH OR REFUSE. Two files named <sid>.jsonl in different project dirs
+    # is not a thing to pick between by mtime — that is how you mirror the wrong history.
+    if [[ -z "$PROJ" ]]; then
+      _hits=(); for _f in "$INSTANCE_DIR"/.claude/projects/*/"$SID".jsonl \
+                          "$HOME"/.claude/projects/*/"$SID".jsonl; do
+        [[ -f "$_f" ]] && _hits+=("$_f")
+      done
+      # dedupe: for an independent instance $HOME IS $INSTANCE_DIR, so each hit appears twice
+      _s=""; _u=(); for _f in "${_hits[@]}"; do
+        case "$_s" in *"|$_f|"*) continue ;; esac
+        _s="$_s|$_f|"; _u+=("$_f")
+      done
+      _hits=("${_u[@]}"); unset _s _u
+      if [[ ${#_hits[@]} -eq 1 ]]; then
+        PROJ=$(dirname "${_hits[0]}")
+        SID_SRC="$SID_SRC, found by UUID SEARCH in $PROJ (NOT the slug-derived path — the"
+        SID_SRC="$SID_SRC transcript has MOVED, probably an in-session worktree switch)"
+        echo "!! NOTE: $SID.jsonl is NOT where the slug says it should be." >&2
+        echo "!!       Found it by uuid at: ${_hits[0]}" >&2
+        echo "!!       A session that changes cwd moves its transcript (Forge-ba0e, 10-01)." >&2
+      elif [[ ${#_hits[@]} -gt 1 ]]; then
+        printf 'AMBIGUOUS: session id %s names %s transcripts:\n' "$SID" "${#_hits[@]}" >&2
+        printf '  %s\n' "${_hits[@]}" >&2
+        die "refusing to pick between transcripts by mtime"
+      fi
+      unset _hits _f
+    fi
     if [[ -z "$PROJ" ]]; then
       printf 'session id %s names no transcript in any known layout. Tried:\n' "$SID" >&2
       # A LOOP, not printf recycling. `printf 'fmt' "${ARR[@]}" "$SID"` reuses the

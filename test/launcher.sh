@@ -198,5 +198,41 @@ ok "$([ "$DUPES" = "0" ] && echo 1 || echo 0)" \
 rm -rf "$RG"
 
 echo
+echo "6. ⭐ THE TRANSCRIPT MOVED TO ANOTHER PROJECT SLUG — found by UUID, not by cwd."
+echo "   Measured by Forge-ba0e on Den (2.1.283): she called EnterWorktree MID-SESSION on"
+echo "   2026-10-01, and today her original slug dir holds NO .jsonl while the full 76 MB"
+echo "   history sits under <slug>--claude-worktrees-forge-docs-2026-10-01/. So the slug"
+echo "   follows the session's CURRENT cwd, and both candidates above are derived from a"
+echo "   RECORDED workdir — neither can find a transcript that has moved."
+echo "   My ledger 006 said 'keyed to the LAUNCH cwd'. Correct for the launch, INCOMPLETE"
+echo "   for a session that changes cwd later. Before this, the launcher refused to start."
+MOVED="$INST/.claude/projects/${SLUG}--claude-worktrees-forge-docs-2026-10-01"
+rm -rf "$CH" "$UH"; mkdir -p "$CH" "$UH" "$MOVED"
+echo '{}' > "$MOVED/moved1.jsonl"
+OUT6=$(run moved1)
+ok "$(grep -q 'UUID' <<<"$OUT6" && echo 1 || echo 0)" "⭐ finds a MOVED transcript by uuid instead of refusing"
+ok "$(grep -qF "$MOVED/moved1.jsonl" <<<"$OUT6" && echo 1 || echo 0)" "and names where it actually found it"
+ok "$(grep -qi 'has MOVED\|NOT where the slug says' <<<"$OUT6" && echo 1 || echo 0)" "⭐ and SAYS the transcript moved — never silently"
+ok "$(grep -q 'names no transcript' <<<"$OUT6" && echo 0 || echo 1)" "and does not refuse any more"
+
+echo
+echo "7. ⭐ TWO transcripts with one uuid in different project dirs -> REFUSE, never mtime."
+MOVED2="$INST/.claude/projects/${SLUG}--claude-worktrees-other"
+mkdir -p "$MOVED2"; echo '{}' > "$MOVED2/moved1.jsonl"
+OUT7=$(run moved1)
+ok "$(grep -qi 'AMBIGUOUS' <<<"$OUT7" && echo 1 || echo 0)" "⭐ two dirs holding <uuid>.jsonl is AMBIGUOUS"
+ok "$(grep -qi 'refusing to pick between transcripts' <<<"$OUT7" && echo 1 || echo 0)" "and refuses rather than choosing by mtime"
+ok "$(grep -qF "$MOVED/moved1.jsonl" <<<"$OUT7" && grep -qF "$MOVED2/moved1.jsonl" <<<"$OUT7" && echo 1 || echo 0)" "and names BOTH, so a human can act"
+rm -rf "$MOVED2"
+
+echo
+echo "8. the SLUG path still wins when it exists — the uuid search is a LAST resort."
+echo '{}' > "$CH/moved1.jsonl"
+OUT8=$(run moved1)
+ok "$(grep -qF "$CH/moved1.jsonl" <<<"$OUT8" && echo 1 || echo 0)" "slug-derived path still resolves normally"
+ok "$(grep -qi 'NOT where the slug says' <<<"$OUT8" && echo 0 || echo 1)" "⭐ and does NOT cry 'moved' when nothing moved"
+rm -rf "$MOVED"
+
+echo
 echo "passed=$pass failed=$fail"
 exit $([ "$fail" = "0" ] && echo 0 || echo 1)
