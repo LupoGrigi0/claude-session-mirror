@@ -192,7 +192,7 @@ $allowUpload    = if ($PSBoundParameters.ContainsKey('WithUploads')) { [int][boo
 # Corrected by Lantern-4224 on Cairn-2001's review, 2026-10-08.
 
 $env:MIRROR_BIND      = $Bind
-# Parity with bin/mirror-start.sh:317-318. The Windows port omitted these, so the
+# Parity with bin/mirror-start.sh:363-364 (origin/master, 2026-10-10). The Windows port omitted these, so the
 # server reported instance="unknown" and labelled the mind "Instance" -- a mind
 # shown to its human without its name. ${INSTANCE%%-*} strips from the FIRST
 # hyphen: Lantern-4224 -> Lantern. Found by Lantern-4224, 2026-10-07.
