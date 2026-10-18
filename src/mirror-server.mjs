@@ -826,6 +826,19 @@ let lastAssert = 0;
 // pendingPoll's could-not-look tracking stays about the channel alone.
 const directPending = new Map();   // request_id -> { request_id, tool_name, input, ts }
 const directVerdicts = new Map();  // request_id -> { behavior, message, at }
+// A card must SHOW what is being approved (Bastion approves blind otherwise). Derive a readable
+// preview from the tool input; the UI reads `input_preview`, falling back to '(no preview available)'.
+function previewOf(tool, input) {
+  input = input || {};
+  try {
+    if (tool === 'Bash') return String(input.command || '').slice(0, 400) || '(no command)';
+    if (tool === 'Write' || tool === 'Edit' || tool === 'NotebookEdit')
+      return String(input.file_path || input.path || '(no path)') + ` (${tool.toLowerCase()})`;
+    if (tool === 'Read') return String(input.file_path || input.path || '(no path)');
+    const j = JSON.stringify(input);
+    return j.length > 400 ? j.slice(0, 400) + '…' : j;
+  } catch { return '(unpreviewable input)'; }
+}
 
 // WHY THIS STATE EXISTS, and it is Bastion-3012's requirement, 2026-10-05:
 //
@@ -1587,14 +1600,17 @@ const server = http.createServer(async (req, res) => {
     let body = {};
     try { body = JSON.parse(await readBody(req)); } catch { /* below */ }
     const id = typeof body.request_id === 'string' ? body.request_id.trim()
-             : typeof body.tool_use_id === 'string' ? body.tool_use_id.trim() : '';
+             : typeof body.tool_use_id === 'string' ? body.tool_use_id.trim()
+             : typeof body.id === 'string' ? body.id.trim() : '';   // relay sends `id`
     if (!id || typeof body.tool_name !== 'string') {
       res.writeHead(400, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error:'request_id (or tool_use_id) and tool_name required' }));
       return;
     }
     directVerdicts.delete(id);
-    directPending.set(id, { request_id: id, tool_name: body.tool_name, input: body.input ?? {}, ts: Date.now() });
+    directPending.set(id, { request_id: id, tool_name: body.tool_name, input: body.input ?? {},
+                            input_preview: previewOf(body.tool_name, body.input),
+                            received_at: new Date().toISOString(), ts: Date.now() });
     broadcastEphemeral(permissionsEvent());
     log(`permission-request ${id} (${body.tool_name}) held; ${directPending.size} direct pending`);
     res.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({ ok:true, request_id:id }));
