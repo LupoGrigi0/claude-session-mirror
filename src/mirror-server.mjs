@@ -171,6 +171,27 @@ if (idRefusal) {
 
 fs.mkdirSync(cfg.dataDir, { recursive: true });
 
+// GUARD (Lantern-4224, 2026-10-18): a shared/foreign data dir. The mode marker below is ONE file
+// per dir, not per instance, so a permissions-mode start here writes `.permissions-only` that would
+// make ANOTHER instance's full-mode mirror refuse to boot at its next restart -- silently. Lantern hit
+// exactly this: a test mirror with MIRROR_DATA_DIR unset defaulted to ~/.claude-mirror, the same dir a
+// live production mirror uses. If this dir already holds another instance's event log, refuse rather
+// than clobber. The operator's fix is a scratch MIRROR_DATA_DIR.
+if (cfg.mode === 'permissions') {
+  let foreign = [];
+  try {
+    foreign = fs.readdirSync(cfg.dataDir).filter(n => n.endsWith('.jsonl') && n !== `${cfg.instance}.jsonl`);
+  } catch { /* unreadable: mkdir just ran, so treat as empty */ }
+  if (foreign.length) {
+    console.error(
+      `refusing to start: ${cfg.dataDir} already holds another instance's event log (${foreign.join(', ')}).\n` +
+      `  Permissions mode would write a shared .permissions-only marker here and make THAT instance's\n` +
+      `  full-mode mirror refuse to boot at its next restart -- silently.\n` +
+      `  Point this instance at its own dir:  MIRROR_DATA_DIR=<scratch>`);
+    process.exit(1);
+  }
+}
+
 // --- mode stickiness ---------------------------------------------------------
 // The failure worth preventing: MIRROR_MODE unset on some later restart, and a
 // root session silently becomes a full mirror publishing every command it runs.
