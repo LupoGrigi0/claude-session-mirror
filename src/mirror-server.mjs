@@ -820,6 +820,12 @@ const tailer = cfg.mode !== 'full' ? null : new TranscriptTailer({
 let pending = [];
 let pendingAt = 0;
 let lastAssert = 0;
+// v2 DIRECT PATH (channels off): a permission-relay (--permission-prompt-tool on the mind's side)
+// POSTs gated calls straight here and long-polls the verdict, instead of the channel poll. Kept in
+// SEPARATE maps so the channel poll's `pending = next` replace never clobbers them, and so
+// pendingPoll's could-not-look tracking stays about the channel alone.
+const directPending = new Map();   // request_id -> { request_id, tool_name, input, ts }
+const directVerdicts = new Map();  // request_id -> { behavior, message, at }
 
 // WHY THIS STATE EXISTS, and it is Bastion-3012's requirement, 2026-10-05:
 //
@@ -966,7 +972,7 @@ function permissionsEvent() {
   return {
     ts: new Date().toISOString(), room_id: cfg.room, type: 'permissions',
     from: { id: 'system', kind: 'system', display: 'permissions' },
-    body: { pending },
+    body: { pending: [...pending, ...directPending.values()] },
   };
 }
 
@@ -1531,6 +1537,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // DIRECT path: if the relay is holding this id, the verdict goes to IT (recorded for
+    // its long-poll), not the channel. Drop the card, refresh viewers.
+    if (directPending.has(id)) {
+      directVerdicts.set(id, { behavior, message: behavior === 'deny' ? 'denied by human' : undefined, at: Date.now() });
+      directPending.delete(id);
+      broadcastEphemeral(permissionsEvent());
+      log(`permission ${behavior} ${id} by ${senderAddress(who)} (direct)`);
+      res.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({ ok:true, direct:true }));
+      return;
+    }
+
     try {
       const r = await fetch(cfg.channelUrl + '/permission-verdict', {
         method: 'POST',
@@ -1558,6 +1575,42 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(502, {'Content-Type':'application/json'})
          .end(JSON.stringify({ ok:false, error: err.message }));
     }
+    return;
+  }
+
+  // ---- v2 DIRECT permission path (relay <-> mirror, channels off) -----------
+  // POST /permission-request : the relay publishes a gated call it is holding.
+  if (req.method === 'POST' && p === '/permission-request') {
+    // Local trusted publish (the relay runs beside the mind). The APPROVAL gate stays
+    // on POST /permission (authenticated human); this only raises a card. TODO: shared
+    // token before this is reachable from anywhere but loopback.
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch { /* below */ }
+    const id = typeof body.request_id === 'string' ? body.request_id.trim()
+             : typeof body.tool_use_id === 'string' ? body.tool_use_id.trim() : '';
+    if (!id || typeof body.tool_name !== 'string') {
+      res.writeHead(400, {'Content-Type':'application/json'})
+         .end(JSON.stringify({ ok:false, error:'request_id (or tool_use_id) and tool_name required' }));
+      return;
+    }
+    directVerdicts.delete(id);
+    directPending.set(id, { request_id: id, tool_name: body.tool_name, input: body.input ?? {}, ts: Date.now() });
+    broadcastEphemeral(permissionsEvent());
+    log(`permission-request ${id} (${body.tool_name}) held; ${directPending.size} direct pending`);
+    res.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({ ok:true, request_id:id }));
+    return;
+  }
+
+  // GET /permission-verdict?id= : the relay long-polls here. Three-valued on purpose:
+  // resolved | pending | unknown. A relay that cannot tell pending from gone would hang
+  // or fail open; it gets a clear word.
+  if (req.method === 'GET' && p === '/permission-verdict') {
+    const id = (url.searchParams.get('id') || '').trim();
+    if (!id) { res.writeHead(400, {'Content-Type':'application/json'}).end(JSON.stringify({ ok:false, error:'id required' })); return; }
+    const v = directVerdicts.get(id);
+    if (v) { res.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({ ok:true, status:'resolved', ...v })); return; }
+    res.writeHead(200, {'Content-Type':'application/json'})
+       .end(JSON.stringify({ ok:true, status: directPending.has(id) ? 'pending' : 'unknown' }));
     return;
   }
 
@@ -1787,7 +1840,7 @@ const server = http.createServer(async (req, res) => {
     // carries the list, and ephemeral frames are never replayed, so without this
     // a freshly opened tab would show no cards until the next change — which,
     // for a session blocked on approval, could be forever.
-    if (pending.length) { try { client.res.write(ephemeralFrame(permissionsEvent())); } catch { /* gone */ } }
+    if (pending.length || directPending.size) { try { client.res.write(ephemeralFrame(permissionsEvent())); } catch { /* gone */ } }
     log(`client attached (from seq ${afterSeq}); ${clients.size} total`);
 
     // LOG THE DETACH, not just the attach.
