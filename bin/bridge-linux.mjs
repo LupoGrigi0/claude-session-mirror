@@ -95,6 +95,14 @@ export function buildPrompt(target, from, text, marker) {
 // Serial: messages reach the mind in the order they were typed.
 let chain = Promise.resolve();
 
+// The one-shot relay must run on the MIND'S login auth, not inherit ours. Strip
+// ANTHROPIC_* (would force an API key over the login) and CLAUDE_CODE_* (a leaked
+// CLAUDE_CODE_SESSION_ID makes the subprocess act inside our session instead of a
+// clean one-shot). Measured need on .nexus, 2026-10-23 — Cairn.
+const RELAY_ENV = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_CODE_)/.test(k))
+);
+
 function relay(id, from, text) {
   let marker;
   do { marker = 'M' + randomBytes(8).toString('hex'); } while (text.includes(marker));
@@ -105,7 +113,7 @@ function relay(id, from, text) {
     // is what hung the PowerShell harness's children (FIRST-LAUNCH-FINDINGS §6).
     const child = spawn(cfg.claude,
       ['--print', '--model', cfg.model, '--tools', 'SendMessage', '--no-session-persistence'],
-      { cwd: cfg.workdir, stdio: ['pipe', 'pipe', 'pipe'] });
+      { cwd: cfg.workdir, stdio: ['pipe', 'pipe', 'pipe'], env: RELAY_ENV });
     let out = '', err = '';
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { err += d; });
