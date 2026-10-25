@@ -111,8 +111,14 @@ function relay(id, from, text) {
   return new Promise((resolve) => {
     // stdin carries the prompt and is then CLOSED -- an inherited open stdin
     // is what hung the PowerShell harness's children (FIRST-LAUNCH-FINDINGS §6).
+    // --allowedTools PRE-APPROVES SendMessage; --tools only restricts the toolset.
+    // Without it a headless --print relay stalls on SendMessage's permission prompt
+    // (nobody to answer) and exits 0 without SENT. Root-caused + verified by
+    // WakeTest-8bc1, 2026-10-24 (commit 13a3f10 in its worktree). This makes delivery
+    // independent of the mind's own permission mode / settings.json.
     const child = spawn(cfg.claude,
-      ['--print', '--model', cfg.model, '--tools', 'SendMessage', '--no-session-persistence'],
+      ['--print', '--model', cfg.model, '--tools', 'SendMessage',
+       '--allowedTools', 'SendMessage', '--no-session-persistence'],
       { cwd: cfg.workdir, stdio: ['pipe', 'pipe', 'pipe'], env: RELAY_ENV });
     let out = '', err = '';
     child.stdout.on('data', d => { out += d; });
