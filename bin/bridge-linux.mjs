@@ -44,8 +44,8 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const cfg = {
   port:    Number(process.env.BRIDGE_PORT || 22091),
@@ -69,6 +69,54 @@ function log(obj) {
 }
 
 const stats = { accepted: 0, sent: 0, failed: 0, startedAt: new Date().toISOString(), lastResult: null };
+
+// --- permission side channel: files shared with bin/permission-hook.mjs --------
+// The hook (a PermissionRequest hook in the mind's settings.json) writes a card to
+// pending/ and waits, for days if need be, for a verdict in verdicts/. This bridge
+// only lists cards and writes verdicts; all state is on disk, so a bridge restart
+// loses nothing. A card whose hook process is gone (session restarted, answered at
+// the console, hook timed out) is removed here: a card must never outlive the
+// request that made it.
+const PERM_DIR = process.env.PERM_HOOK_DIR || join(process.env.HOME || '/tmp', '.web-bridge', 'permissions');
+const PERM_PENDING = join(PERM_DIR, 'pending');
+const PERM_VERDICTS = join(PERM_DIR, 'verdicts');
+const ID_RE = /^[a-km-z]{5}$/;
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+function pendingCards() {
+  let names = [];
+  try { names = readdirSync(PERM_PENDING); } catch { return []; }
+  const cards = [];
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue;
+    const p = join(PERM_PENDING, n);
+    let c;
+    try { c = JSON.parse(readFileSync(p, 'utf8')); } catch { continue; }
+    if (!ID_RE.test(c.request_id || '')) continue;
+    if (c.pid && !alive(c.pid)) {
+      try { rmSync(p, { force: true }); rmSync(join(PERM_VERDICTS, n), { force: true }); } catch {}
+      log({ ev: 'permission-stale', request_id: c.request_id });
+      continue;
+    }
+    cards.push({ request_id: c.request_id, tool_name: c.tool_name, description: c.description,
+                 input_preview: c.input_preview, received_at: c.received_at });
+  }
+  return cards.sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)));
+}
+
+/** Returns an HTTP status: 200 written, 404 not pending, 400 bad request. */
+function writeVerdict(request_id, behavior, message) {
+  if (!ID_RE.test(request_id || '') || (behavior !== 'allow' && behavior !== 'deny')) return 400;
+  if (!existsSync(join(PERM_PENDING, request_id + '.json'))) return 404;
+  mkdirSync(PERM_VERDICTS, { recursive: true, mode: 0o700 });
+  const p = join(PERM_VERDICTS, request_id + '.json');
+  writeFileSync(p + '.tmp', JSON.stringify({ behavior, message, at: new Date().toISOString() }) + '\n', { mode: 0o600 });
+  renameSync(p + '.tmp', p);
+  return 200;
+}
 
 // A display name must not be able to forge structure in the label line
 // (same defect class identity.mjs guards against).
@@ -164,14 +212,20 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, kind: 'web-bridge', target: cfg.target, model: cfg.model,
                             delivery: 'claude --print + SendMessage; accepted != delivered', ...stats });
   }
-  // The mirror polls this every 2 s for its permission panel. This transport has
-  // no side channel for blocking prompts, so the honest answer is an empty list --
-  // and /health says why a permission panel here will always be empty.
+  // The mirror polls this every 2 s for its permission panel. Cards come from
+  // bin/permission-hook.mjs; with no hook installed the list is honestly empty.
   if (req.method === 'GET' && p === '/pending-permissions') {
-    return send(res, 200, { pending: [], note: 'web-bridge has no permission side channel' });
+    return send(res, 200, { instance: cfg.target, pending: pendingCards(),
+                            source: 'PermissionRequest hook (bin/permission-hook.mjs)' });
   }
   if (req.method === 'POST' && p === '/permission-verdict') {
-    return send(res, 501, { ok: false, error: 'web-bridge cannot answer permission prompts' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (e) { return send(res, 400, { ok: false, reason: 'bad json' }); }
+    const code = writeVerdict(body.request_id, body.behavior, typeof body.message === 'string' ? body.message : undefined);
+    log({ ev: 'permission-verdict', request_id: body.request_id, behavior: body.behavior, status: code });
+    if (code === 404) return send(res, 404, { ok: false, applied: false, reason: 'request_id not found or already resolved' });
+    if (code === 400) return send(res, 400, { ok: false, reason: 'request_id and behavior ("allow"|"deny") required' });
+    return send(res, 200, { ok: true, applied: true });
   }
 
   if (req.method === 'POST' && p === '/direct-message') {
