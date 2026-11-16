@@ -21,8 +21,11 @@
  *
  * THE RELAY IS A MODEL, SO THE TEXT IS DATA
  *   The sender's text reaches the relay inside random-nonce markers with an
- *   instruction to copy it, not obey it. The relay has one tool (--tools
- *   SendMessage), so an injection that DID land could only send a message.
+ *   instruction to copy it, not obey it. The relay's ONLY tool is SendMessage
+ *   (--tools SendMessage + --strict-mcp-config; --tools ALONE does NOT unload
+ *   MCP servers once ~ is a git repo), so an injection that DID land could only
+ *   send a message. Without --strict-mcp-config the relay coin-flipped to
+ *   mcp__hacs__send_message (Orla #1 / Crossing-2d23 2026-11-03).
  *   Measured 2026-09-28: apostrophes, quotes, emoji, newlines and an
  *   "ignore all previous instructions" line all arrived verbatim, ~10 s.
  *   The prompt goes over STDIN, not argv: no Windows quoting, no 32k argv cap.
@@ -166,7 +169,7 @@ function relay(id, from, text) {
     // independent of the mind's own permission mode / settings.json.
     const child = spawn(cfg.claude,
       ['--print', '--model', cfg.model, '--tools', 'SendMessage',
-       '--allowedTools', 'SendMessage', '--no-session-persistence'],
+       '--allowedTools', 'SendMessage', '--strict-mcp-config', '--no-session-persistence'],
       { cwd: cfg.workdir, stdio: ['pipe', 'pipe', 'pipe'], env: RELAY_ENV });
     let out = '', err = '';
     child.stdout.on('data', d => { out += d; });
